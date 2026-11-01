@@ -1,0 +1,3 @@
+# Client-first media engine inside a modular monorepo
+
+For the MVP, video decoding, silence detection, canvas composition, and MP4 export run entirely in the browser (`Web Audio API`, `<canvas>`, and `WebCodecs`) while the codebase is structured as a multi-package monorepo (`apps/web`, `packages/editor-core`, `packages/media-engine`, `packages/ai-agent`). This avoids uploading multi-hundred-megabyte video files to a server, gives instant interactive feedback on cuts and captions, and keeps all domain state (`Timeline`) and rendering logic decoupled in pure packages so a server-side rendering worker or database persistence layer can be added later without re-architecting the editor.

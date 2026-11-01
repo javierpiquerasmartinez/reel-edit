@@ -1,0 +1,3 @@
+# WebCodecs hardware-accelerated export and client-side 16kHz audio extraction
+
+MP4 export uses the browser's `WebCodecs` API (`VideoDecoder`, `OffscreenCanvas`, `VideoEncoder`, `AudioEncoder`) with a TypeScript MP4 muxer inside a Web Worker rather than `ffmpeg.wasm`, while speech transcription extracts a 16kHz mono audio track via `OfflineAudioContext` before calling STT APIs. `WebCodecs` leverages native GPU encoding to export 1080x1920 Reels an order of magnitude faster than CPU-bound WebAssembly, and local 16kHz audio extraction reduces multi-hundred-megabyte source videos to ~1–3 MB payloads that stay well under cloud STT upload limits (such as OpenAI Whisper's 25 MB cap).

@@ -1,0 +1,3 @@
+# Hybrid cloud and in-browser Whisper transcription
+
+Speech-to-text transcription with Word Timings is provided through a dual adapter in `packages/media-engine`: OpenAI's `whisper-1` API when an OpenAI API key is configured, and an in-browser local Whisper model (`@huggingface/transformers` via WebGPU/Wasm inside a Web Worker) as a zero-key default or when the creator brings an LLM key without a dedicated STT endpoint (such as Anthropic Claude). This ensures that Captions, Silence Region refinement, and text-based video editing always work out of the box without forcing a specific cloud vendor.
