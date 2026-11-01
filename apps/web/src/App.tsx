@@ -187,6 +187,7 @@ export function App() {
 
       const video = videoRef.current;
       if (
+        !isPlaying &&
         video &&
         video.paused &&
         Math.abs(video.currentTime * 1000 - layout.sourceTimeMs) > 16
@@ -213,7 +214,7 @@ export function App() {
       }
       renderFrame(ctx, videoRef.current, layout);
     },
-    [computeLayout],
+    [computeLayout, isPlaying],
   );
 
   useEffect(() => {
@@ -771,7 +772,6 @@ export function App() {
                     ref={videoRef}
                     src={videoUrl}
                     preload="auto"
-                    muted
                     onLoadedMetadata={handleVideoLoadedMetadata}
                     onLoadedData={() =>
                       drawCurrentFrame(timelineTimeMsRef.current)
