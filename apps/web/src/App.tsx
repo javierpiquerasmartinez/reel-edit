@@ -1,20 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_CLIP_TRANSFORM,
+  DEFAULT_SILENCE_CONFIG,
   EditorSession,
+  type AudioEnvelope,
   type Clip,
   type ClipFitMode,
   type EditorState,
+  type SilenceDetectionConfig,
 } from "@reel-edit/editor-core";
 import {
+  decodeSourceMediaAudioEnvelope,
   evaluatePlaybackStep,
+  projectSilencePreview,
   renderFrame,
   resolveFrameLayout,
+  sliceClipWaveform,
   type FrameLayoutDescriptor,
 } from "@reel-edit/media-engine";
 import {
   ArrowLeft,
   ArrowRight,
+  AudioWaveform,
   Film,
   Maximize2,
   Pause,
@@ -43,10 +50,14 @@ export function App() {
   const [timelineZoom, setTimelineZoom] = useState<number>(1);
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [showSafeArea, setShowSafeArea] = useState<boolean>(false);
+  const [silenceConfig, setSilenceConfig] = useState<SilenceDetectionConfig>(
+    DEFAULT_SILENCE_CONFIG,
+  );
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const decodedEnvelopePromiseRef = useRef<Promise<AudioEnvelope> | null>(null);
   const activeClipIdRef = useRef<string>("clip-1");
   const timelineTimeMsRef = useRef<number>(0);
   timelineTimeMsRef.current = timelineTimeMs;
@@ -85,10 +96,11 @@ export function App() {
 
   const initializeSourceMedia = useCallback(
     (fileName: string, durationMs: number, width: number, height: number) => {
+      const safeDurationMs = Math.max(100, Math.round(durationMs));
       const nextSession = EditorSession.fromSourceMedia({
         id: `source-${Date.now()}`,
         fileName,
-        durationMs: Math.max(100, Math.round(durationMs)),
+        durationMs: safeDurationMs,
         width: width > 0 ? width : CANVAS_WIDTH,
         height: height > 0 ? height : CANVAS_HEIGHT,
       });
@@ -99,6 +111,15 @@ export function App() {
       activeClipIdRef.current = "clip-1";
       setIsPlaying(false);
       setStatusMessage(null);
+
+      const envelopePromise = decodedEnvelopePromiseRef.current;
+      if (envelopePromise) {
+        void envelopePromise.then((decodedEnvelope) => {
+          if (decodedEnvelope.peaks.length > 0) {
+            nextSession.setAudioEnvelope(decodedEnvelope);
+          }
+        });
+      }
     },
     [],
   );
@@ -108,6 +129,10 @@ export function App() {
     if (!file) {
       return;
     }
+
+    decodedEnvelopePromiseRef.current = decodeSourceMediaAudioEnvelope(file, {
+      bucketDurationMs: 100,
+    });
 
     if (typeof URL.createObjectURL === "function") {
       try {
@@ -456,6 +481,23 @@ export function App() {
     }
   }, [editorState, seekToTimelineTime, selectedClipIds, session]);
 
+  const handleRemoveSilences = useCallback(() => {
+    if (!session) {
+      return;
+    }
+    const res = session.dispatch({
+      type: "removeSilences",
+      thresholdDb: silenceConfig.thresholdDb,
+      minDurationMs: silenceConfig.minDurationMs,
+      paddingMs: silenceConfig.paddingMs,
+    });
+    setStatusMessage(
+      res.applied
+        ? "Removed Silence Regions with Ripple Delete"
+        : (res.reason ?? null),
+    );
+  }, [session, silenceConfig]);
+
   const handleUndo = useCallback(() => {
     if (!session) {
       return;
@@ -519,6 +561,13 @@ export function App() {
     currentLayout?.activeClip ??
     null;
   const activeTransform = selectedClip?.transform ?? DEFAULT_CLIP_TRANSFORM;
+  const silencePreview = editorState
+    ? projectSilencePreview(
+        editorState.timeline,
+        editorState.audioEnvelope,
+        silenceConfig,
+      )
+    : null;
   const canDeleteSelected =
     Boolean(editorState) &&
     selectedClipIds.length > 0 &&
@@ -754,6 +803,113 @@ export function App() {
                 </div>
               </div>
 
+              {/* Silences Detection & Removal Panel */}
+              <div className="border-t border-zinc-800 pt-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                    <AudioWaveform className="w-3.5 h-3.5 text-rose-400" />
+                    <span>Silences</span>
+                  </div>
+                  {silencePreview && (
+                    <span
+                      data-testid="silence-preview-summary"
+                      className="rounded bg-rose-500/15 border border-rose-500/30 px-2 py-0.5 text-[11px] font-mono text-rose-300"
+                    >
+                      {silencePreview.cutCount}{" "}
+                      {silencePreview.cutCount === 1 ? "cut" : "cuts"} ·{" "}
+                      {(silencePreview.savedDurationMs / 1000).toFixed(1)}s
+                      saved
+                    </span>
+                  )}
+                </div>
+
+                <div className="space-y-2.5">
+                  <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                    <span className="flex justify-between">
+                      <span>Silence Threshold (dB)</span>
+                      <span className="font-mono text-zinc-200">
+                        {silenceConfig.thresholdDb} dB
+                      </span>
+                    </span>
+                    <input
+                      aria-label="Silence Threshold (dB)"
+                      type="range"
+                      min={-60}
+                      max={-10}
+                      step={1}
+                      value={silenceConfig.thresholdDb}
+                      onChange={(e) =>
+                        setSilenceConfig((prev) => ({
+                          ...prev,
+                          thresholdDb: Number(e.target.value),
+                        }))
+                      }
+                      className="w-full accent-rose-400"
+                    />
+                  </label>
+
+                  <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                    <span className="flex justify-between">
+                      <span>Min Silence Duration (ms)</span>
+                      <span className="font-mono text-zinc-200">
+                        {silenceConfig.minDurationMs} ms
+                      </span>
+                    </span>
+                    <input
+                      aria-label="Min Silence Duration (ms)"
+                      type="range"
+                      min={100}
+                      max={3000}
+                      step={50}
+                      value={silenceConfig.minDurationMs}
+                      onChange={(e) =>
+                        setSilenceConfig((prev) => ({
+                          ...prev,
+                          minDurationMs: Math.max(
+                            50,
+                            Number(e.target.value) || 50,
+                          ),
+                        }))
+                      }
+                      className="w-full accent-rose-400"
+                    />
+                  </label>
+
+                  <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                    <span className="flex justify-between">
+                      <span>Speech Padding (ms)</span>
+                      <span className="font-mono text-zinc-200">
+                        {silenceConfig.paddingMs} ms
+                      </span>
+                    </span>
+                    <input
+                      aria-label="Speech Padding (ms)"
+                      type="range"
+                      min={0}
+                      max={500}
+                      step={10}
+                      value={silenceConfig.paddingMs}
+                      onChange={(e) =>
+                        setSilenceConfig((prev) => ({
+                          ...prev,
+                          paddingMs: Math.max(0, Number(e.target.value) || 0),
+                        }))
+                      }
+                      className="w-full accent-rose-400"
+                    />
+                  </label>
+
+                  <button
+                    type="button"
+                    onClick={handleRemoveSilences}
+                    disabled={!silencePreview || silencePreview.cutCount === 0}
+                    className="w-full rounded-lg border border-rose-500/40 bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-40 px-3 py-1.5 text-xs font-semibold text-rose-200 transition"
+                  >
+                    Remove Silences
+                  </button>
+                </div>
+              </div>
+
               {statusMessage && (
                 <div
                   role="status"
@@ -945,6 +1101,15 @@ export function App() {
                       (clip.durationMs / editorState.timeline.durationMs) * 100,
                     ),
                   );
+                  const waveformBars = editorState.audioEnvelope
+                    ? sliceClipWaveform(
+                        editorState.audioEnvelope,
+                        clip,
+                        silencePreview?.silenceRegions ?? [],
+                      )
+                    : [];
+                  const clipSilenceIntervals =
+                    silencePreview?.clipSilences[clip.id] ?? [];
                   return (
                     <div
                       key={clip.id}
@@ -1014,6 +1179,40 @@ export function App() {
                             <ArrowRight className="w-3 h-3" />
                           </button>
                         </div>
+                      </div>
+
+                      {/* Synchronized Audio Waveform & Shaded Silence Regions */}
+                      <div
+                        data-testid={`clip-waveform-${clip.id}`}
+                        className="relative mt-2.5 h-10 rounded-lg bg-zinc-950/90 border border-zinc-800/80 py-1 flex items-center gap-[1px] overflow-hidden"
+                      >
+                        {clipSilenceIntervals.map((interval, idx) => (
+                          <div
+                            key={`${interval.sourceStartMs}-${interval.sourceEndMs}`}
+                            data-testid={`clip-silence-region-${clip.id}-${idx}`}
+                            style={{
+                              left: `${(interval.startRatio * 100).toFixed(2)}%`,
+                              width: `${((interval.endRatio - interval.startRatio) * 100).toFixed(2)}%`,
+                            }}
+                            className="pointer-events-none absolute inset-y-0 bg-rose-500/25 border-x border-rose-400/50"
+                          />
+                        ))}
+                        {waveformBars.map((bar) => (
+                          <div
+                            key={bar.index}
+                            data-waveform-bar={bar.isSilent ? "silent" : "speech"}
+                            style={{
+                              flexGrow: bar.durationMs,
+                              flexBasis: 0,
+                              height: `${Math.max(14, Math.round(bar.peak * 100))}%`,
+                            }}
+                            className={`min-w-[1px] rounded-full transition-all ${
+                              bar.isSilent
+                                ? "bg-rose-400/70"
+                                : "bg-sky-400/85"
+                            }`}
+                          />
+                        ))}
                       </div>
 
                       {/* Timeline Trim Handles */}

@@ -1,6 +1,14 @@
 import { describe, expect, test } from "vitest";
 import { EditorSession } from "@reel-edit/editor-core";
-import { evaluatePlaybackStep, resolveFrameLayout } from "./index.js";
+import {
+  decodeSourceMediaAudioEnvelope,
+  detectSilenceRegions,
+  evaluatePlaybackStep,
+  extractAudioEnvelopeFromSamples,
+  projectSilencePreview,
+  resolveFrameLayout,
+  sliceClipWaveform,
+} from "./index.js";
 
 describe("media-engine 9:16 frame compositor descriptor", () => {
   test("resolves active Clip and maps Timeline Time to exact Source Time across adjacent Clips without gaps", () => {
@@ -238,5 +246,147 @@ describe("media-engine 9:16 frame compositor descriptor", () => {
       width: 1620,
       height: 2880,
     });
+  });
+
+  test("detectSilenceRegions extracts Silence Regions from a synthetic PCM amplitude buffer respecting thresholdDb, minDurationMs, and paddingMs", () => {
+    // 10 seconds of mono PCM audio at 1000 Hz (10,000 samples)
+    // Spoken segments: amplitude 0.5 (~ -6.02 dB)
+    // Silent segments: amplitude 0.002 (~ -53.98 dB)
+    // - [0..1500ms]: speech
+    // - [1500..3500ms]: 2000ms silence -> padded by 100ms at speech boundaries -> [1600..3400ms] (1800ms)
+    // - [3500..5000ms]: speech
+    // - [5000..5300ms]: 300ms short pause (< minDurationMs 500ms) -> ignored
+    // - [5300..6500ms]: speech
+    // - [6500..8000ms]: 1500ms silence -> padded by 100ms at speech boundaries -> [6600..7900ms] (1300ms)
+    // - [8000..10000ms]: speech
+    const sampleRateHz = 1000;
+    const samples = new Float32Array(10000);
+    for (let i = 0; i < samples.length; i++) {
+      const timeMs = i;
+      const isSilent1 = timeMs >= 1500 && timeMs < 3500;
+      const isShortPause = timeMs >= 5000 && timeMs < 5300;
+      const isSilent2 = timeMs >= 6500 && timeMs < 8000;
+      samples[i] = isSilent1 || isShortPause || isSilent2 ? 0.002 : 0.5;
+    }
+
+    const regions = detectSilenceRegions(
+      { samples, sampleRateHz, bucketDurationMs: 50 },
+      {
+        thresholdDb: -35,
+        minDurationMs: 500,
+        paddingMs: 100,
+      },
+    );
+
+    expect(regions).toEqual([
+      {
+        startMs: 1600,
+        endMs: 3400,
+        durationMs: 1800,
+      },
+      {
+        startMs: 6600,
+        endMs: 7900,
+        durationMs: 1300,
+      },
+    ]);
+
+    // Raising minDurationMs to 1600ms filters out the second 1500ms silence
+    const stricterRegions = detectSilenceRegions(
+      extractAudioEnvelopeFromSamples(samples, sampleRateHz, 50),
+      {
+        thresholdDb: -35,
+        minDurationMs: 1600,
+        paddingMs: 100,
+      },
+    );
+    expect(stricterRegions).toEqual([
+      {
+        startMs: 1600,
+        endMs: 3400,
+        durationMs: 1800,
+      },
+    ]);
+  });
+
+  test("decodes Web Audio API AudioBuffer into an AudioEnvelope, slices Clip waveforms across splits/trims, and previews cuts and time saved", async () => {
+    // 6000ms at 100Hz = 600 samples, bucketDurationMs = 500ms (12 buckets)
+    // Silence in [2000..4000ms] (buckets 4..7)
+    const channelData = new Float32Array(600);
+    for (let i = 0; i < 600; i++) {
+      const timeMs = i * 10;
+      channelData[i] = timeMs >= 2000 && timeMs < 4000 ? 0.001 : 0.8;
+    }
+
+    const envelope = await decodeSourceMediaAudioEnvelope(new ArrayBuffer(16), {
+      bucketDurationMs: 500,
+      audioContextFactory: () => ({
+        decodeAudioData: async () => ({
+          duration: 6,
+          sampleRate: 100,
+          numberOfChannels: 1,
+          getChannelData: () => channelData,
+        }),
+      }),
+    });
+
+    expect(envelope.durationMs).toBe(6000);
+    expect(envelope.bucketDurationMs).toBe(500);
+    expect(envelope.peaks).toHaveLength(12);
+
+    const session = EditorSession.fromSourceMedia(
+      {
+        id: "source-1",
+        fileName: "voice.mp4",
+        durationMs: 6000,
+        width: 1080,
+        height: 1920,
+      },
+      { audioEnvelope: envelope },
+    );
+
+    const previewFull = projectSilencePreview(
+      session.getState().timeline,
+      envelope,
+      {
+        thresholdDb: -35,
+        minDurationMs: 500,
+        paddingMs: 100,
+      },
+    );
+    // [2000..4000ms] padded by 100ms -> [2100..3900ms] (1800ms saved, 1 cut)
+    expect(previewFull.cutCount).toBe(1);
+    expect(previewFull.savedDurationMs).toBe(1800);
+    expect(previewFull.clipSilences["clip-1"]).toEqual([
+      {
+        sourceStartMs: 2100,
+        sourceEndMs: 3900,
+        offsetStartMs: 2100,
+        offsetEndMs: 3900,
+        startRatio: 2100 / 6000,
+        endRatio: 3900 / 6000,
+        durationMs: 1800,
+      },
+    ]);
+
+    // Split at 1500ms -> clip-1 [0..1500ms] (3 buckets of speech), clip-2 [1500..6000ms] (9 buckets containing the silence)
+    session.dispatch({ type: "splitClip", timelineTimeMs: 1500 });
+    const [clip1, clip2] = session.getState().timeline.clips;
+
+    const clip1Slice = sliceClipWaveform(
+      envelope,
+      clip1!,
+      previewFull.silenceRegions,
+    );
+    expect(clip1Slice).toHaveLength(3);
+    expect(clip1Slice.every((bar) => !bar.isSilent && bar.peak > 0.5)).toBe(true);
+
+    const clip2Slice = sliceClipWaveform(
+      envelope,
+      clip2!,
+      previewFull.silenceRegions,
+    );
+    expect(clip2Slice).toHaveLength(9);
+    expect(clip2Slice.some((bar) => bar.isSilent)).toBe(true);
   });
 });

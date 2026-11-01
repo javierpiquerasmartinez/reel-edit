@@ -1,9 +1,336 @@
 import {
   DEFAULT_CLIP_TRANSFORM,
+  computeSilenceRegionsFromEnvelope,
+  getAudioEnvelopeBucketRange,
+  type AudioEnvelope,
   type Clip,
   type ClipTransform,
   type EditorState,
+  type SilenceDetectionConfig,
+  type SilenceRegion,
+  type Timeline,
 } from "@reel-edit/editor-core";
+
+export interface PcmAudioInput {
+  readonly samples: Float32Array | readonly number[];
+  readonly sampleRateHz: number;
+  readonly bucketDurationMs?: number;
+}
+
+export interface DecodedAudioBufferLike {
+  readonly duration: number;
+  readonly sampleRate: number;
+  readonly numberOfChannels: number;
+  getChannelData(channel: number): Float32Array;
+}
+
+export interface DecodeAudioEnvelopeOptions {
+  readonly bucketDurationMs?: number;
+  readonly audioContextFactory?: () => {
+    decodeAudioData(data: ArrayBuffer): Promise<DecodedAudioBufferLike>;
+    close?: () => Promise<void> | void;
+  };
+}
+
+export interface ClipSilenceInterval {
+  readonly sourceStartMs: number;
+  readonly sourceEndMs: number;
+  readonly offsetStartMs: number;
+  readonly offsetEndMs: number;
+  readonly startRatio: number;
+  readonly endRatio: number;
+  readonly durationMs: number;
+}
+
+export interface SilencePreviewSummary {
+  readonly silenceRegions: readonly SilenceRegion[];
+  readonly clipSilences: Readonly<Record<string, readonly ClipSilenceInterval[]>>;
+  readonly cutCount: number;
+  readonly savedDurationMs: number;
+}
+
+export interface WaveformBarDescriptor {
+  readonly index: number;
+  readonly sourceStartMs: number;
+  readonly sourceEndMs: number;
+  readonly durationMs: number;
+  readonly peak: number;
+  readonly isSilent: boolean;
+}
+
+export function extractAudioEnvelopeFromSamples(
+  samples: Float32Array | readonly number[],
+  sampleRateHz: number,
+  bucketDurationMs = 50,
+): AudioEnvelope {
+  const safeSampleRate = Math.max(1, sampleRateHz);
+  const safeBucketMs = Math.max(1, bucketDurationMs);
+  const durationMs = Math.max(
+    0,
+    Math.round((samples.length / safeSampleRate) * 1000),
+  );
+  if (samples.length === 0 || durationMs === 0) {
+    return {
+      bucketDurationMs: safeBucketMs,
+      durationMs: 0,
+      peaks: [],
+    };
+  }
+
+  const samplesPerBucket = Math.max(
+    1,
+    Math.round((safeSampleRate * safeBucketMs) / 1000),
+  );
+  const bucketCount = Math.max(1, Math.ceil(samples.length / samplesPerBucket));
+  const peaks: number[] = [];
+
+  for (let b = 0; b < bucketCount; b++) {
+    const startIdx = b * samplesPerBucket;
+    const endIdx = Math.min(samples.length, startIdx + samplesPerBucket);
+    let maxPeak = 0;
+    for (let i = startIdx; i < endIdx; i++) {
+      const absVal = Math.abs(samples[i]!);
+      if (absVal > maxPeak) {
+        maxPeak = absVal;
+      }
+    }
+    peaks.push(Math.min(1, maxPeak));
+  }
+
+  return {
+    bucketDurationMs: safeBucketMs,
+    durationMs,
+    peaks,
+  };
+}
+
+export function extractAudioEnvelopeFromAudioBuffer(
+  audioBuffer: DecodedAudioBufferLike,
+  bucketDurationMs = 50,
+): AudioEnvelope {
+  const channelCount = Math.max(0, audioBuffer.numberOfChannels);
+  if (channelCount === 0) {
+    return {
+      bucketDurationMs,
+      durationMs: Math.max(0, Math.round(audioBuffer.duration * 1000)),
+      peaks: [],
+    };
+  }
+
+  const primary = audioBuffer.getChannelData(0);
+  if (channelCount === 1) {
+    return extractAudioEnvelopeFromSamples(
+      primary,
+      audioBuffer.sampleRate,
+      bucketDurationMs,
+    );
+  }
+
+  const combined = new Float32Array(primary.length);
+  for (let ch = 0; ch < channelCount; ch++) {
+    const channelData = audioBuffer.getChannelData(ch);
+    const len = Math.min(combined.length, channelData.length);
+    for (let i = 0; i < len; i++) {
+      const absVal = Math.abs(channelData[i]!);
+      if (absVal > combined[i]!) {
+        combined[i] = absVal;
+      }
+    }
+  }
+
+  return extractAudioEnvelopeFromSamples(
+    combined,
+    audioBuffer.sampleRate,
+    bucketDurationMs,
+  );
+}
+
+function getDefaultBrowserAudioContextFactory():
+  | DecodeAudioEnvelopeOptions["audioContextFactory"]
+  | null {
+  if (typeof globalThis === "undefined") {
+    return null;
+  }
+  const win = globalThis as unknown as {
+    AudioContext?: new () => {
+      decodeAudioData(data: ArrayBuffer): Promise<DecodedAudioBufferLike>;
+      close?: () => Promise<void> | void;
+    };
+    webkitAudioContext?: new () => {
+      decodeAudioData(data: ArrayBuffer): Promise<DecodedAudioBufferLike>;
+      close?: () => Promise<void> | void;
+    };
+  };
+  const Ctor = win.AudioContext ?? win.webkitAudioContext;
+  if (!Ctor) {
+    return null;
+  }
+  return () => new Ctor();
+}
+
+export async function decodeSourceMediaAudioEnvelope(
+  source: Blob | ArrayBuffer,
+  options: DecodeAudioEnvelopeOptions = {},
+): Promise<AudioEnvelope> {
+  const bucketDurationMs = options.bucketDurationMs ?? 100;
+  const factory =
+    options.audioContextFactory ?? getDefaultBrowserAudioContextFactory();
+
+  if (!factory) {
+    return {
+      bucketDurationMs,
+      durationMs: 0,
+      peaks: [],
+    };
+  }
+
+  let ctx: ReturnType<NonNullable<typeof factory>> | null = null;
+  try {
+    const arrayBuffer =
+      source instanceof ArrayBuffer
+        ? source
+        : typeof source.arrayBuffer === "function"
+          ? await source.arrayBuffer()
+          : await new Promise<ArrayBuffer>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () =>
+                resolve(
+                  reader.result instanceof ArrayBuffer
+                    ? reader.result
+                    : new ArrayBuffer(0),
+                );
+              reader.onerror = () =>
+                reject(reader.error ?? new Error("Failed to read Blob"));
+              reader.readAsArrayBuffer(source);
+            });
+    ctx = factory();
+    const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+    return extractAudioEnvelopeFromAudioBuffer(audioBuffer, bucketDurationMs);
+  } catch {
+    return {
+      bucketDurationMs,
+      durationMs: 0,
+      peaks: [],
+    };
+  } finally {
+    try {
+      await ctx?.close?.();
+    } catch {
+      // Ignore AudioContext close errors
+    }
+  }
+}
+
+export function detectSilenceRegions(
+  input: AudioEnvelope | PcmAudioInput,
+  config: SilenceDetectionConfig,
+): SilenceRegion[] {
+  const envelope: AudioEnvelope =
+    "peaks" in input
+      ? input
+      : extractAudioEnvelopeFromSamples(
+          input.samples,
+          input.sampleRateHz,
+          input.bucketDurationMs ?? 50,
+        );
+  return computeSilenceRegionsFromEnvelope(envelope, config);
+}
+
+export function projectSilencePreview(
+  timeline: Timeline,
+  envelope: AudioEnvelope | null | undefined,
+  config: SilenceDetectionConfig,
+): SilencePreviewSummary {
+  if (!envelope) {
+    return {
+      silenceRegions: [],
+      clipSilences: {},
+      cutCount: 0,
+      savedDurationMs: 0,
+    };
+  }
+
+  const silenceRegions = computeSilenceRegionsFromEnvelope(envelope, config);
+  const clipSilences: Record<string, ClipSilenceInterval[]> = {};
+  let cutCount = 0;
+  let savedDurationMs = 0;
+
+  for (const clip of timeline.clips) {
+    const intervals: ClipSilenceInterval[] = [];
+    const safeClipDuration = Math.max(1, clip.durationMs);
+
+    for (const region of silenceRegions) {
+      const overlapStartMs = Math.max(clip.sourceStartMs, region.startMs);
+      const overlapEndMs = Math.min(clip.sourceEndMs, region.endMs);
+      if (overlapEndMs > overlapStartMs) {
+        const offsetStartMs = overlapStartMs - clip.sourceStartMs;
+        const offsetEndMs = overlapEndMs - clip.sourceStartMs;
+        const durationMs = overlapEndMs - overlapStartMs;
+        intervals.push({
+          sourceStartMs: overlapStartMs,
+          sourceEndMs: overlapEndMs,
+          offsetStartMs,
+          offsetEndMs,
+          startRatio: offsetStartMs / safeClipDuration,
+          endRatio: offsetEndMs / safeClipDuration,
+          durationMs,
+        });
+        cutCount++;
+        savedDurationMs += durationMs;
+      }
+    }
+
+    clipSilences[clip.id] = intervals;
+  }
+
+  return {
+    silenceRegions,
+    clipSilences,
+    cutCount,
+    savedDurationMs,
+  };
+}
+
+export function sliceClipWaveform(
+  envelope: AudioEnvelope,
+  clip: Pick<Clip, "sourceStartMs" | "sourceEndMs" | "durationMs">,
+  silenceRegions: readonly SilenceRegion[] = [],
+): WaveformBarDescriptor[] {
+  if (envelope.bucketDurationMs <= 0 || envelope.peaks.length === 0) {
+    return [];
+  }
+
+  const bars: WaveformBarDescriptor[] = [];
+  for (let i = 0; i < envelope.peaks.length; i++) {
+    const { startMs: bucketStartMs, endMs: bucketEndMs } =
+      getAudioEnvelopeBucketRange(envelope, i);
+    if (bucketEndMs <= clip.sourceStartMs || bucketStartMs >= clip.sourceEndMs) {
+      continue;
+    }
+
+    const clampedStartMs = Math.max(clip.sourceStartMs, bucketStartMs);
+    const clampedEndMs = Math.min(clip.sourceEndMs, bucketEndMs);
+    const durationMs = clampedEndMs - clampedStartMs;
+    if (durationMs <= 0) {
+      continue;
+    }
+    const midpointMs = (clampedStartMs + clampedEndMs) / 2;
+    const isSilent = silenceRegions.some(
+      (region) => midpointMs >= region.startMs && midpointMs <= region.endMs,
+    );
+
+    bars.push({
+      index: i,
+      sourceStartMs: clampedStartMs,
+      sourceEndMs: clampedEndMs,
+      durationMs,
+      peak: envelope.peaks[i]!,
+      isSilent,
+    });
+  }
+
+  return bars;
+}
 
 export interface Rect {
   readonly x: number;

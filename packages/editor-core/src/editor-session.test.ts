@@ -537,4 +537,104 @@ describe("EditorSession", () => {
     ]);
     expect(session.getState().timeline.clips[0]?.transform.scale).toBe(1.25);
   });
+
+  test("removeSilences splits active Clips around detected Silence Regions with speech padding, applies Ripple Delete, and reverts in a single Undo step", () => {
+    // 100 buckets of 100ms = 10000ms total
+    const peaks = Array.from({ length: 100 }, (_, index) => {
+      const timeMs = index * 100;
+      // Silence 1: [2000..3600ms] (1600ms)
+      if (timeMs >= 2000 && timeMs < 3600) {
+        return 0.002;
+      }
+      // Brief pause below minDurationMs: [5000..5300ms] (300ms)
+      if (timeMs >= 5000 && timeMs < 5300) {
+        return 0.002;
+      }
+      // Silence 2: [6500..8500ms] (2000ms)
+      if (timeMs >= 6500 && timeMs < 8500) {
+        return 0.001;
+      }
+      return 0.6;
+    });
+
+    const session = EditorSession.fromSourceMedia(
+      {
+        id: "source-1",
+        fileName: "talking-head.mp4",
+        durationMs: 10000,
+        width: 1080,
+        height: 1920,
+      },
+      {
+        audioEnvelope: {
+          bucketDurationMs: 100,
+          durationMs: 10000,
+          peaks,
+        },
+      },
+    );
+
+    const res = session.dispatch({
+      type: "removeSilences",
+      thresholdDb: -35,
+      minDurationMs: 500,
+      paddingMs: 150,
+    });
+    expect(res.applied).toBe(true);
+
+    const afterRemove = session.getState();
+    // Silence 1 padded: [2150..3450] (1300ms removed)
+    // Silence 2 padded: [6650..8350] (1700ms removed)
+    // Remaining clips: [0..2150], [3450..6650], [8350..10000] -> total 7000ms
+    expect(afterRemove.timeline.durationMs).toBe(7000);
+    expect(afterRemove.timeline.clips).toEqual([
+      {
+        id: "clip-1",
+        sourceStartMs: 0,
+        sourceEndMs: 2150,
+        timelineStartMs: 0,
+        timelineEndMs: 2150,
+        durationMs: 2150,
+        transform: DEFAULT_TRANSFORM,
+      },
+      {
+        id: "clip-2",
+        sourceStartMs: 3450,
+        sourceEndMs: 6650,
+        timelineStartMs: 2150,
+        timelineEndMs: 5350,
+        durationMs: 3200,
+        transform: DEFAULT_TRANSFORM,
+      },
+      {
+        id: "clip-3",
+        sourceStartMs: 8350,
+        sourceEndMs: 10000,
+        timelineStartMs: 5350,
+        timelineEndMs: 7000,
+        durationMs: 1650,
+        transform: DEFAULT_TRANSFORM,
+      },
+    ]);
+
+    // Single Undo step restores exact prior 1-Clip Timeline [0..10000ms]
+    expect(session.undo()).toBe(true);
+    expect(session.getState().timeline.durationMs).toBe(10000);
+    expect(session.getState().timeline.clips).toEqual([
+      {
+        id: "clip-1",
+        sourceStartMs: 0,
+        sourceEndMs: 10000,
+        timelineStartMs: 0,
+        timelineEndMs: 10000,
+        durationMs: 10000,
+        transform: DEFAULT_TRANSFORM,
+      },
+    ]);
+
+    // Single Redo step re-applies removeSilences
+    expect(session.redo()).toBe(true);
+    expect(session.getState().timeline.durationMs).toBe(7000);
+    expect(session.getState().timeline.clips).toHaveLength(3);
+  });
 });

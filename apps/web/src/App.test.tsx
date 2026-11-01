@@ -1,6 +1,30 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { App } from "./App.js";
+
+function createTestAudioBufferChannel(): Float32Array {
+  // 12 seconds at 100 Hz = 1200 samples
+  const samples = new Float32Array(1200);
+  for (let i = 0; i < samples.length; i++) {
+    const timeMs = i * 10;
+    if (timeMs >= 2400 && timeMs < 4200) {
+      samples[i] = 0.002;
+    } else if (timeMs >= 5800 && timeMs < 6100) {
+      samples[i] = 0.005;
+    } else if (timeMs >= 7800 && timeMs < 9600) {
+      samples[i] = 0.001;
+    } else {
+      samples[i] = 0.65;
+    }
+  }
+  return samples;
+}
 
 beforeEach(() => {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
@@ -16,10 +40,28 @@ beforeEach(() => {
     lineWidth: 1,
     font: "",
   } as unknown as CanvasRenderingContext2D);
+
+  const channelData = createTestAudioBufferChannel();
+  (
+    globalThis as unknown as {
+      AudioContext?: unknown;
+    }
+  ).AudioContext = class MockAudioContext {
+    async decodeAudioData() {
+      return {
+        duration: 12,
+        sampleRate: 100,
+        numberOfChannels: 1,
+        getChannelData: () => channelData,
+      };
+    }
+    async close() {}
+  };
 });
 
 afterEach(() => {
   cleanup();
+  delete (globalThis as unknown as { AudioContext?: unknown }).AudioContext;
   vi.restoreAllMocks();
 });
 
@@ -159,5 +201,85 @@ describe("Reel Edit Web Workspace (Issue 01)", () => {
     fireEvent.keyDown(window, { key: "z", metaKey: true });
     expect(screen.getByTestId("timeline-duration").textContent).toBe("00:12.000");
     expect(screen.queryByTestId("timeline-clip-clip-3")).toBeNull();
+  });
+
+  test("renders audio waveform with shaded Silence Regions on Timeline Clips, recalculates cuts and time saved when adjusting thresholdDb/minDurationMs/paddingMs, and executes reversible removeSilences", async () => {
+    render(<App />);
+
+    const fileInput = screen.getByLabelText(/import source media/i);
+    const fakeVideoFile = new File(["video-bytes"], "talking-head.mp4", {
+      type: "video/mp4",
+    });
+    fireEvent.change(fileInput, { target: { files: [fakeVideoFile] } });
+
+    // Wait for Web Audio API decodeAudioData to populate the waveform and shaded Silence Regions inside clip-1
+    await waitFor(() => {
+      expect(
+        screen.getAllByTestId(/^clip-silence-region-clip-1-/),
+      ).toHaveLength(2);
+    });
+    const clip1Waveform = screen.getByTestId("clip-waveform-clip-1");
+    expect(clip1Waveform).toBeDefined();
+    expect(
+      clip1Waveform.querySelectorAll("[data-waveform-bar]").length,
+    ).toBeGreaterThan(10);
+    expect(screen.getByTestId("silence-preview-summary").textContent).toContain(
+      "2 cuts · 3.1s saved",
+    );
+
+    // Adjust minDurationMs to 250ms and paddingMs to 50ms -> catches the 300ms pause as a 3rd Silence Region
+    fireEvent.change(screen.getByLabelText(/min silence duration/i), {
+      target: { value: "250" },
+    });
+    fireEvent.change(screen.getByLabelText(/speech padding/i), {
+      target: { value: "50" },
+    });
+    expect(
+      screen.getAllByTestId(/^clip-silence-region-clip-1-/),
+    ).toHaveLength(3);
+    expect(screen.getByTestId("silence-preview-summary").textContent).toContain(
+      "3 cuts · 3.6s saved",
+    );
+
+    // Adjust to thresholdDb = -35, minDurationMs = 500, paddingMs = 100 -> 2 cuts saving 3200ms (3.2s)
+    fireEvent.change(screen.getByLabelText(/silence threshold/i), {
+      target: { value: "-35" },
+    });
+    fireEvent.change(screen.getByLabelText(/min silence duration/i), {
+      target: { value: "500" },
+    });
+    fireEvent.change(screen.getByLabelText(/speech padding/i), {
+      target: { value: "100" },
+    });
+    expect(screen.getByTestId("silence-preview-summary").textContent).toContain(
+      "2 cuts · 3.2s saved",
+    );
+
+    // Execute removeSilences -> splits clip-1 around the 2 Silence Regions and Ripple-Deletes silent intervals
+    fireEvent.click(screen.getByRole("button", { name: /remove silences/i }));
+
+    // Timeline duration decreases from 12.000s to 8.800s across 3 contiguous Clips
+    expect(screen.getByTestId("timeline-duration").textContent).toBe("00:08.800");
+    expect(screen.getByTestId("timeline-clip-clip-1")).toBeDefined();
+    expect(screen.getByTestId("timeline-clip-clip-2")).toBeDefined();
+    expect(screen.getByTestId("timeline-clip-clip-3")).toBeDefined();
+
+    // Each split Clip renders its own corresponding slice of the audio waveform
+    expect(screen.getByTestId("clip-waveform-clip-1")).toBeDefined();
+    expect(screen.getByTestId("clip-waveform-clip-2")).toBeDefined();
+    expect(screen.getByTestId("clip-waveform-clip-3")).toBeDefined();
+    expect(screen.getByTestId("silence-preview-summary").textContent).toContain(
+      "0 cuts · 0.0s saved",
+    );
+
+    // Single Undo step restores the exact prior 1-Clip Timeline [0..12000ms]
+    fireEvent.keyDown(window, { key: "z", metaKey: true });
+    expect(screen.getByTestId("timeline-duration").textContent).toBe("00:12.000");
+    expect(screen.getByTestId("timeline-clip-clip-1")).toBeDefined();
+    expect(screen.queryByTestId("timeline-clip-clip-2")).toBeNull();
+    expect(screen.queryByTestId("timeline-clip-clip-3")).toBeNull();
+    expect(screen.getByTestId("silence-preview-summary").textContent).toContain(
+      "2 cuts · 3.2s saved",
+    );
   });
 });

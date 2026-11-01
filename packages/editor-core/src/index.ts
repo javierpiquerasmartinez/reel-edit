@@ -40,8 +40,132 @@ export interface Timeline {
   readonly durationMs: number;
 }
 
+export interface AudioEnvelope {
+  readonly bucketDurationMs: number;
+  readonly durationMs: number;
+  readonly peaks: readonly number[];
+}
+
+export const SilenceDetectionConfigSchema = z.object({
+  thresholdDb: z.number().finite(),
+  minDurationMs: z.number().finite().positive(),
+  paddingMs: z.number().finite().min(0),
+});
+
+export type SilenceDetectionConfig = z.infer<
+  typeof SilenceDetectionConfigSchema
+>;
+
+export const DEFAULT_SILENCE_CONFIG: SilenceDetectionConfig = Object.freeze({
+  thresholdDb: -35,
+  minDurationMs: 500,
+  paddingMs: 120,
+});
+
+export interface SilenceRegion {
+  readonly startMs: number;
+  readonly endMs: number;
+  readonly durationMs: number;
+}
+
+export function cloneAudioEnvelope(envelope: AudioEnvelope): AudioEnvelope {
+  return {
+    bucketDurationMs: envelope.bucketDurationMs,
+    durationMs: envelope.durationMs,
+    peaks: [...envelope.peaks],
+  };
+}
+
+export function getAudioEnvelopeBucketRange(
+  envelope: AudioEnvelope,
+  index: number,
+): { readonly startMs: number; readonly endMs: number } {
+  const startMs = Math.min(
+    envelope.durationMs,
+    index * envelope.bucketDurationMs,
+  );
+  const endMs = Math.min(
+    envelope.durationMs,
+    (index + 1) * envelope.bucketDurationMs,
+  );
+  return { startMs, endMs };
+}
+
+export function computeSilenceRegionsFromEnvelope(
+  envelope: AudioEnvelope,
+  config: SilenceDetectionConfig,
+): SilenceRegion[] {
+  if (
+    envelope.bucketDurationMs <= 0 ||
+    envelope.durationMs <= 0 ||
+    envelope.peaks.length === 0
+  ) {
+    return [];
+  }
+
+  const thresholdLinear = Math.pow(10, config.thresholdDb / 20);
+  const minDurationMs = Math.max(1, config.minDurationMs);
+  const paddingMs = Math.max(0, config.paddingMs);
+
+  const rawSilences: Array<{ startMs: number; endMs: number }> = [];
+  let currentSilenceStartMs: number | null = null;
+
+  for (let i = 0; i < envelope.peaks.length; i++) {
+    const peak = Math.max(0, envelope.peaks[i]!);
+    const { startMs: bucketStartMs, endMs: bucketEndMs } =
+      getAudioEnvelopeBucketRange(envelope, i);
+    if (bucketEndMs <= bucketStartMs) {
+      continue;
+    }
+
+    const isSilent = peak < thresholdLinear;
+    if (isSilent) {
+      if (currentSilenceStartMs === null) {
+        currentSilenceStartMs = bucketStartMs;
+      }
+    } else if (currentSilenceStartMs !== null) {
+      rawSilences.push({
+        startMs: currentSilenceStartMs,
+        endMs: bucketStartMs,
+      });
+      currentSilenceStartMs = null;
+    }
+  }
+
+  if (currentSilenceStartMs !== null) {
+    rawSilences.push({
+      startMs: currentSilenceStartMs,
+      endMs: envelope.durationMs,
+    });
+  }
+
+  const regions: SilenceRegion[] = [];
+  for (const raw of rawSilences) {
+    const rawDurationMs = raw.endMs - raw.startMs;
+    if (rawDurationMs < minDurationMs) {
+      continue;
+    }
+
+    const paddedStartMs =
+      raw.startMs > 0 ? raw.startMs + paddingMs : raw.startMs;
+    const paddedEndMs =
+      raw.endMs < envelope.durationMs ? raw.endMs - paddingMs : raw.endMs;
+
+    if (paddedEndMs > paddedStartMs) {
+      regions.push({
+        startMs: Math.round(paddedStartMs),
+        endMs: Math.round(paddedEndMs),
+        durationMs: Math.round(paddedEndMs - paddedStartMs),
+      });
+    }
+  }
+
+  return regions;
+}
+
 export interface EditorState {
   readonly sourceMedia: SourceMedia;
+  readonly audioEnvelope?: AudioEnvelope | null;
   readonly timeline: Timeline;
   readonly canUndo: boolean;
   readonly canRedo: boolean;
@@ -85,6 +209,10 @@ export const DuplicateClipAsHookCommandSchema = z.object({
   sourceEndMs: z.number().finite(),
 });
 
+export const RemoveSilencesCommandSchema = SilenceDetectionConfigSchema.extend({
+  type: z.literal("removeSilences"),
+});
+
 export const EditCommandSchema = z.discriminatedUnion("type", [
   SplitClipCommandSchema,
   DeleteClipsCommandSchema,
@@ -92,6 +220,7 @@ export const EditCommandSchema = z.discriminatedUnion("type", [
   SetClipTransformCommandSchema,
   ReorderClipCommandSchema,
   DuplicateClipAsHookCommandSchema,
+  RemoveSilencesCommandSchema,
 ]);
 
 export type SplitClipCommand = z.infer<typeof SplitClipCommandSchema>;
@@ -102,6 +231,7 @@ export type ReorderClipCommand = z.infer<typeof ReorderClipCommandSchema>;
 export type DuplicateClipAsHookCommand = z.infer<
   typeof DuplicateClipAsHookCommandSchema
 >;
+export type RemoveSilencesCommand = z.infer<typeof RemoveSilencesCommandSchema>;
 export type EditCommand = z.infer<typeof EditCommandSchema>;
 
 export interface DispatchResult {
@@ -155,19 +285,30 @@ function projectTimeline(sourceClips: readonly SourceClipRange[]): Timeline {
   };
 }
 
+export interface EditorSessionOptions {
+  readonly audioEnvelope?: AudioEnvelope;
+}
+
 export class EditorSession {
   private readonly sourceMedia: SourceMedia;
+  private audioEnvelope: AudioEnvelope | null;
   private clips: readonly SourceClipRange[];
   private nextClipCounter = 2;
   private undoStack: HistorySnapshot[] = [];
   private redoStack: HistorySnapshot[] = [];
   private listeners = new Set<() => void>();
 
-  private constructor(sourceMedia: SourceMedia) {
+  private constructor(
+    sourceMedia: SourceMedia,
+    options: EditorSessionOptions = {},
+  ) {
     if (sourceMedia.durationMs <= 0) {
       throw new Error("Source Media durationMs must be greater than 0");
     }
     this.sourceMedia = Object.freeze({ ...sourceMedia });
+    this.audioEnvelope = options.audioEnvelope
+      ? cloneAudioEnvelope(options.audioEnvelope)
+      : null;
     this.clips = [
       {
         id: "clip-1",
@@ -178,8 +319,16 @@ export class EditorSession {
     ];
   }
 
-  static fromSourceMedia(sourceMedia: SourceMedia): EditorSession {
-    return new EditorSession(sourceMedia);
+  static fromSourceMedia(
+    sourceMedia: SourceMedia,
+    options: EditorSessionOptions = {},
+  ): EditorSession {
+    return new EditorSession(sourceMedia, options);
+  }
+
+  setAudioEnvelope(audioEnvelope: AudioEnvelope): void {
+    this.audioEnvelope = cloneAudioEnvelope(audioEnvelope);
+    this.notify();
   }
 
   subscribe(listener: () => void): () => void {
@@ -219,6 +368,7 @@ export class EditorSession {
   getState(): EditorState {
     return {
       sourceMedia: this.sourceMedia,
+      audioEnvelope: this.audioEnvelope,
       timeline: projectTimeline(this.clips),
       canUndo: this.undoStack.length > 0,
       canRedo: this.redoStack.length > 0,
@@ -391,6 +541,88 @@ export class EditorSession {
       };
 
       const nextClips = [hookClip, ...this.clips];
+      return this.commitClips(snapshotBefore, nextClips);
+    }
+
+    if (parsed.type === "removeSilences") {
+      if (!this.audioEnvelope) {
+        return {
+          applied: false,
+          reason: "No audio amplitude envelope available for Source Media",
+        };
+      }
+
+      const silenceRegions = computeSilenceRegionsFromEnvelope(
+        this.audioEnvelope,
+        parsed,
+      );
+
+      if (silenceRegions.length === 0) {
+        return {
+          applied: false,
+          reason: "No Silence Regions detected with current settings",
+        };
+      }
+
+      let changed = false;
+      const nextClips: SourceClipRange[] = [];
+
+      for (const clip of this.clips) {
+        let clipRanges: Array<{ startMs: number; endMs: number }> = [
+          { startMs: clip.sourceStartMs, endMs: clip.sourceEndMs },
+        ];
+
+        for (const region of silenceRegions) {
+          clipRanges = clipRanges.flatMap((range) => {
+            if (
+              region.endMs <= range.startMs ||
+              region.startMs >= range.endMs
+            ) {
+              return [range];
+            }
+            const kept: Array<{ startMs: number; endMs: number }> = [];
+            if (region.startMs > range.startMs) {
+              kept.push({ startMs: range.startMs, endMs: region.startMs });
+            }
+            if (region.endMs < range.endMs) {
+              kept.push({ startMs: region.endMs, endMs: range.endMs });
+            }
+            return kept;
+          });
+        }
+
+        if (
+          clipRanges.length !== 1 ||
+          clipRanges[0]!.startMs !== clip.sourceStartMs ||
+          clipRanges[0]!.endMs !== clip.sourceEndMs
+        ) {
+          changed = true;
+        }
+
+        clipRanges.forEach((range, rangeIndex) => {
+          nextClips.push({
+            id: rangeIndex === 0 ? clip.id : `clip-${this.nextClipCounter++}`,
+            sourceStartMs: range.startMs,
+            sourceEndMs: range.endMs,
+            transform: { ...clip.transform },
+          });
+        });
+      }
+
+      if (!changed) {
+        return {
+          applied: false,
+          reason: "No Silence Regions overlap active Clips",
+        };
+      }
+
+      if (nextClips.length === 0) {
+        return {
+          applied: false,
+          reason: "Cannot remove all Clips from the Timeline",
+        };
+      }
+
       return this.commitClips(snapshotBefore, nextClips);
     }
 
