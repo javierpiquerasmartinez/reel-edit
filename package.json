@@ -1,0 +1,17 @@
+{
+  "name": "reel-edit",
+  "private": true,
+  "packageManager": "pnpm@11.6.0",
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "dev": "turbo run dev"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.0",
+    "turbo": "^2.4.0",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}

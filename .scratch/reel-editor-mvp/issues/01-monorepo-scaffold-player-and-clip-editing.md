@@ -4,13 +4,13 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Monorepo builds, typechecks, and runs automated tests across the domain, media, agent, and web packages.
-- [ ] Importing a local video file registers it as immutable **Source Media** and initializes the **Timeline** with a single full-duration **Clip** spanning `[0ms, sourceDurationMs]` in **Source Time**.
-- [ ] The `9:16` vertical canvas player plays, pauses, and scrubs smoothly in **Timeline Time**, accurately transitioning across adjacent **Clips** without black flashes or gaps.
-- [ ] Toggling the **Safe Area** guide overlays non-intrusive boundaries showing where Instagram Reels, TikTok, and YouTube Shorts UI elements sit on a `9:16` frame.
-- [ ] Dispatching `splitClip` (via UI button or `S` shortcut) divides the active **Clip** at the current playhead into two contiguous **Clips** referencing the exact **Source Time** split point.
-- [ ] Dispatching `deleteClips` (via UI button or `Delete`/`Backspace` shortcut) removes the selected **Clips** and applies **Ripple Delete** so all subsequent **Clips** shift earlier in **Timeline Time** with zero blank gaps (and prevents deleting the last remaining **Clip**).
-- [ ] Dispatching `trimClip` (via **Timeline** trim handles) adjusts a **Clip**'s `sourceStartMs` or `sourceEndMs` within valid **Source Media** bounds and ripple-shifts downstream **Clips**.
-- [ ] Every edit operation goes through the deterministic `EditorSession` command bus and supports multi-step `Undo` (`Cmd/Ctrl+Z`) and `Redo` (`Cmd/Ctrl+Shift+Z`), verified by automated tests at the `EditorSession` seam.
+- [x] Monorepo builds, typechecks, and runs automated tests across the domain, media, agent, and web packages.
+- [x] Importing a local video file registers it as immutable **Source Media** and initializes the **Timeline** with a single full-duration **Clip** spanning `[0ms, sourceDurationMs]` in **Source Time**.
+- [x] The `9:16` vertical canvas player plays, pauses, and scrubs smoothly in **Timeline Time**, accurately transitioning across adjacent **Clips** without black flashes or gaps.
+- [x] Toggling the **Safe Area** guide overlays non-intrusive boundaries showing where Instagram Reels, TikTok, and YouTube Shorts UI elements sit on a `9:16` frame.
+- [x] Dispatching `splitClip` (via UI button or `S` shortcut) divides the active **Clip** at the current playhead into two contiguous **Clips** referencing the exact **Source Time** split point.
+- [x] Dispatching `deleteClips` (via UI button or `Delete`/`Backspace` shortcut) removes the selected **Clips** and applies **Ripple Delete** so all subsequent **Clips** shift earlier in **Timeline Time** with zero blank gaps (and prevents deleting the last remaining **Clip**).
+- [x] Dispatching `trimClip` (via **Timeline** trim handles) adjusts a **Clip**'s `sourceStartMs` or `sourceEndMs` within valid **Source Media** bounds and ripple-shifts downstream **Clips**.
+- [x] Every edit operation goes through the deterministic `EditorSession` command bus and supports multi-step `Undo` (`Cmd/Ctrl+Z`) and `Redo` (`Cmd/Ctrl+Shift+Z`), verified by automated tests at the `EditorSession` seam.
