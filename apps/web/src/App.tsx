@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  DEFAULT_CLIP_TRANSFORM,
   EditorSession,
   type Clip,
+  type ClipFitMode,
   type EditorState,
 } from "@reel-edit/editor-core";
 import {
@@ -11,12 +13,16 @@ import {
   type FrameLayoutDescriptor,
 } from "@reel-edit/media-engine";
 import {
+  ArrowLeft,
+  ArrowRight,
   Film,
+  Maximize2,
   Pause,
   Play,
   Redo2,
   Scissors,
   ShieldCheck,
+  Sparkles,
   Trash2,
   Undo2,
   Upload,
@@ -178,6 +184,19 @@ export function App() {
         return;
       }
       activeClipIdRef.current = layout.activeClip.id;
+
+      const video = videoRef.current;
+      if (
+        video &&
+        video.paused &&
+        Math.abs(video.currentTime * 1000 - layout.sourceTimeMs) > 16
+      ) {
+        try {
+          video.currentTime = layout.sourceTimeMs / 1000;
+        } catch {
+          // Ignore in non-media test environments
+        }
+      }
 
       const canvas = canvasRef.current;
       if (!canvas) {
@@ -357,6 +376,85 @@ export function App() {
     [session],
   );
 
+  const handleSetClipTransform = useCallback(
+    (
+      updates: {
+        fitMode?: ClipFitMode;
+        scale?: number;
+        offsetX?: number;
+        offsetY?: number;
+      },
+      applyToAll = false,
+    ) => {
+      if (!session || !editorState) {
+        return;
+      }
+      const targetIds = applyToAll
+        ? editorState.timeline.clips.map((c) => c.id)
+        : selectedClipIds.length > 0
+          ? selectedClipIds
+          : editorState.timeline.clips[0]
+            ? [editorState.timeline.clips[0].id]
+            : [];
+      if (targetIds.length === 0) {
+        return;
+      }
+      const res = session.dispatch({
+        type: "setClipTransform",
+        clipIds: targetIds,
+        ...updates,
+      });
+      setStatusMessage(
+        res.applied ? "Updated Clip transform" : (res.reason ?? null),
+      );
+    },
+    [editorState, selectedClipIds, session],
+  );
+
+  const handleReorderClip = useCallback(
+    (clipId: string, targetIndex: number) => {
+      if (!session) {
+        return;
+      }
+      const res = session.dispatch({
+        type: "reorderClip",
+        clipId,
+        targetIndex,
+      });
+      setStatusMessage(
+        res.applied ? `Reordered ${clipId}` : (res.reason ?? null),
+      );
+    },
+    [session],
+  );
+
+  const handlePromoteAsHook = useCallback(() => {
+    if (!session || !editorState) {
+      return;
+    }
+    const targetClip =
+      editorState.timeline.clips.find((c) => selectedClipIds.includes(c.id)) ??
+      editorState.timeline.clips[0];
+    if (!targetClip) {
+      return;
+    }
+    const res = session.dispatch({
+      type: "duplicateClipAsHook",
+      sourceStartMs: targetClip.sourceStartMs,
+      sourceEndMs: targetClip.sourceEndMs,
+    });
+    if (res.applied) {
+      const nextFirst = session.getState().timeline.clips[0];
+      if (nextFirst) {
+        setSelectedClipIds([nextFirst.id]);
+      }
+      seekToTimelineTime(0);
+      setStatusMessage(`Promoted ${targetClip.id} as opening Hook at 00:00.000`);
+    } else if (res.reason) {
+      setStatusMessage(res.reason);
+    }
+  }, [editorState, seekToTimelineTime, selectedClipIds, session]);
+
   const handleUndo = useCallback(() => {
     if (!session) {
       return;
@@ -415,6 +513,11 @@ export function App() {
   }, [handleDeleteSelectedClips, handleRedo, handleSplitAtPlayhead, handleUndo]);
 
   const currentLayout = computeLayout(timelineTimeMs);
+  const selectedClip =
+    editorState?.timeline.clips.find((c) => selectedClipIds.includes(c.id)) ??
+    currentLayout?.activeClip ??
+    null;
+  const activeTransform = selectedClip?.transform ?? DEFAULT_CLIP_TRANSFORM;
   const canDeleteSelected =
     Boolean(editorState) &&
     selectedClipIds.length > 0 &&
@@ -534,6 +637,121 @@ export function App() {
                   </div>
                 </div>
               )}
+
+              {/* Clip Framing (Cover / Contain) & Punch-in Zoom Inspector */}
+              <div className="border-t border-zinc-800 pt-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                    <Maximize2 className="w-3.5 h-3.5 text-sky-400" />
+                    <span>Framing &amp; Punch-in</span>
+                  </div>
+                  <span className="text-[11px] text-zinc-400">
+                    {selectedClipIds.length} selected
+                  </span>
+                </div>
+
+                {/* Cover / Contain Framing Mode Toggle */}
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    aria-pressed={activeTransform.fitMode === "cover"}
+                    onClick={() => handleSetClipTransform({ fitMode: "cover" })}
+                    className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+                      activeTransform.fitMode === "cover"
+                        ? "border-sky-400 bg-sky-500/20 text-sky-200"
+                        : "border-zinc-800 bg-zinc-950 text-zinc-300 hover:bg-zinc-800"
+                    }`}
+                  >
+                    Cover
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={activeTransform.fitMode === "contain"}
+                    onClick={() =>
+                      handleSetClipTransform({ fitMode: "contain" })
+                    }
+                    className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+                      activeTransform.fitMode === "contain"
+                        ? "border-sky-400 bg-sky-500/20 text-sky-200"
+                        : "border-zinc-800 bg-zinc-950 text-zinc-300 hover:bg-zinc-800"
+                    }`}
+                  >
+                    Contain
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleSetClipTransform(
+                      { fitMode: activeTransform.fitMode },
+                      true,
+                    )
+                  }
+                  className="w-full rounded-lg border border-zinc-800 bg-zinc-950 hover:bg-zinc-800 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 transition"
+                >
+                  Apply {activeTransform.fitMode} to All Clips
+                </button>
+
+                {/* Punch-in Zoom Scale & X/Y Pan Offsets */}
+                <div className="space-y-2 pt-1">
+                  <label className="flex flex-col gap-1 text-xs text-zinc-300">
+                    <span className="flex justify-between text-[11px] text-zinc-400">
+                      <span>Punch-in Scale</span>
+                      <span className="font-mono text-sky-300">
+                        {activeTransform.scale.toFixed(2)}×
+                      </span>
+                    </span>
+                    <input
+                      aria-label="Punch-in Scale"
+                      type="number"
+                      min={0.5}
+                      max={3}
+                      step={0.05}
+                      value={activeTransform.scale}
+                      onChange={(e) =>
+                        handleSetClipTransform({
+                          scale: Number(e.target.value),
+                        })
+                      }
+                      className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs font-mono text-zinc-200"
+                    />
+                  </label>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                      <span>Offset X (px)</span>
+                      <input
+                        aria-label="Offset X"
+                        type="number"
+                        step={10}
+                        value={activeTransform.offsetX}
+                        onChange={(e) =>
+                          handleSetClipTransform({
+                            offsetX: Number(e.target.value),
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs font-mono text-zinc-200"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                      <span>Offset Y (px)</span>
+                      <input
+                        aria-label="Offset Y"
+                        type="number"
+                        step={10}
+                        value={activeTransform.offsetY}
+                        onChange={(e) =>
+                          handleSetClipTransform({
+                            offsetY: Number(e.target.value),
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs font-mono text-zinc-200"
+                      />
+                    </label>
+                  </div>
+                </div>
+              </div>
 
               {statusMessage && (
                 <div
@@ -657,6 +875,15 @@ export function App() {
                     Ripple Delete ({selectedClipIds.length} selected · Del)
                   </span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={handlePromoteAsHook}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 hover:bg-amber-500/25 px-3 py-1.5 text-xs font-medium text-amber-200"
+                >
+                  <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Promote as Opening Hook</span>
+                </button>
               </div>
 
               {/* Millisecond-Accurate Playhead Scrubber & Horizontal Zoom */}
@@ -710,7 +937,7 @@ export function App() {
                 className="flex items-stretch gap-1.5"
                 style={{ width: `${Math.round(timelineZoom * 100)}%` }}
               >
-                {editorState.timeline.clips.map((clip) => {
+                {editorState.timeline.clips.map((clip, clipIndex) => {
                   const isSelected = selectedClipIds.includes(clip.id);
                   const widthPercent = Math.max(
                     12,
@@ -729,23 +956,64 @@ export function App() {
                         )
                       }
                       style={{ flexBasis: `${widthPercent}%` }}
-                      className={`group relative rounded-xl border p-3 transition cursor-pointer select-none min-w-[200px] flex-grow ${
+                      className={`group relative rounded-xl border p-3 transition cursor-pointer select-none min-w-[220px] flex-grow ${
                         isSelected
                           ? "border-sky-400 bg-sky-500/15"
                           : "border-zinc-800 bg-zinc-900 hover:border-zinc-700"
                       }`}
                     >
                       <div className="flex items-center justify-between text-xs font-semibold">
-                        <span className="text-zinc-100">{clip.id}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-zinc-100">{clip.id}</span>
+                          <span
+                            data-testid={`clip-badge-${clip.id}`}
+                            className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-mono text-zinc-300"
+                          >
+                            {clip.transform.fitMode} ·{" "}
+                            {clip.transform.scale.toFixed(2)}×
+                          </span>
+                        </div>
                         <span className="font-mono text-[11px] text-sky-300">
                           {formatTimecodeMs(clip.timelineStartMs)} –{" "}
                           {formatTimecodeMs(clip.timelineEndMs)}
                         </span>
                       </div>
 
-                      <div className="mt-1 text-[11px] text-zinc-400 font-mono">
-                        Source: {formatTimecodeMs(clip.sourceStartMs)} →{" "}
-                        {formatTimecodeMs(clip.sourceEndMs)}
+                      <div className="mt-1 flex items-center justify-between text-[11px] text-zinc-400 font-mono">
+                        <span>
+                          Source: {formatTimecodeMs(clip.sourceStartMs)} →{" "}
+                          {formatTimecodeMs(clip.sourceEndMs)}
+                        </span>
+                        <div
+                          className="flex items-center gap-1"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <button
+                            type="button"
+                            aria-label={`Move ${clip.id} earlier`}
+                            disabled={clipIndex === 0}
+                            onClick={() =>
+                              handleReorderClip(clip.id, clipIndex - 1)
+                            }
+                            className="rounded border border-zinc-700 bg-zinc-800 p-1 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30"
+                          >
+                            <ArrowLeft className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Move ${clip.id} later`}
+                            disabled={
+                              clipIndex ===
+                              editorState.timeline.clips.length - 1
+                            }
+                            onClick={() =>
+                              handleReorderClip(clip.id, clipIndex + 1)
+                            }
+                            className="rounded border border-zinc-700 bg-zinc-800 p-1 text-zinc-200 hover:bg-zinc-700 disabled:opacity-30"
+                          >
+                            <ArrowRight className="w-3 h-3" />
+                          </button>
+                        </div>
                       </div>
 
                       {/* Timeline Trim Handles */}

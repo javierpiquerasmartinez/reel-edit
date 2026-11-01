@@ -1,4 +1,9 @@
-import type { Clip, EditorState } from "@reel-edit/editor-core";
+import {
+  DEFAULT_CLIP_TRANSFORM,
+  type Clip,
+  type ClipTransform,
+  type EditorState,
+} from "@reel-edit/editor-core";
 
 export interface Rect {
   readonly x: number;
@@ -30,8 +35,31 @@ export interface FrameLayoutDescriptor {
   readonly timelineTimeMs: number;
   readonly activeClip: Clip;
   readonly sourceTimeMs: number;
+  readonly transform: ClipTransform;
   readonly drawRect: Rect;
+  readonly backdropRect: Rect | null;
   readonly safeArea: SafeAreaOverlay | null;
+}
+
+function computeTransformedDrawRect(
+  sourceWidth: number,
+  sourceHeight: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  transform: ClipTransform,
+): Rect {
+  const safeSrcW = sourceWidth > 0 ? sourceWidth : canvasWidth;
+  const safeSrcH = sourceHeight > 0 ? sourceHeight : canvasHeight;
+  const baseScale =
+    transform.fitMode === "contain"
+      ? Math.min(canvasWidth / safeSrcW, canvasHeight / safeSrcH)
+      : Math.max(canvasWidth / safeSrcW, canvasHeight / safeSrcH);
+  const effectiveScale = baseScale * transform.scale;
+  const width = Math.round(safeSrcW * effectiveScale);
+  const height = Math.round(safeSrcH * effectiveScale);
+  const x = Math.round((canvasWidth - width) / 2 + transform.offsetX);
+  const y = Math.round((canvasHeight - height) / 2 + transform.offsetY);
+  return { x, y, width, height };
 }
 
 function computeCoverDrawRect(
@@ -40,14 +68,13 @@ function computeCoverDrawRect(
   canvasWidth: number,
   canvasHeight: number,
 ): Rect {
-  const safeSrcW = sourceWidth > 0 ? sourceWidth : canvasWidth;
-  const safeSrcH = sourceHeight > 0 ? sourceHeight : canvasHeight;
-  const scale = Math.max(canvasWidth / safeSrcW, canvasHeight / safeSrcH);
-  const width = Math.round(safeSrcW * scale);
-  const height = Math.round(safeSrcH * scale);
-  const x = Math.round((canvasWidth - width) / 2);
-  const y = Math.round((canvasHeight - height) / 2);
-  return { x, y, width, height };
+  return computeTransformedDrawRect(
+    sourceWidth,
+    sourceHeight,
+    canvasWidth,
+    canvasHeight,
+    DEFAULT_CLIP_TRANSFORM,
+  );
 }
 
 function computeSafeAreaOverlay(
@@ -135,12 +162,23 @@ export function resolveFrameLayout(
   );
   const sourceTimeMs = activeClip.sourceStartMs + offsetInClipMs;
 
-  const drawRect = computeCoverDrawRect(
+  const transform = activeClip.transform;
+  const drawRect = computeTransformedDrawRect(
     state.sourceMedia.width,
     state.sourceMedia.height,
     canvasWidth,
     canvasHeight,
+    transform,
   );
+  const backdropRect =
+    transform.fitMode === "contain"
+      ? computeCoverDrawRect(
+          state.sourceMedia.width,
+          state.sourceMedia.height,
+          canvasWidth,
+          canvasHeight,
+        )
+      : null;
 
   return {
     canvasWidth,
@@ -148,7 +186,9 @@ export function resolveFrameLayout(
     timelineTimeMs: clampedTimeMs,
     activeClip,
     sourceTimeMs,
+    transform,
     drawRect,
+    backdropRect,
     safeArea: showSafeArea
       ? computeSafeAreaOverlay(canvasWidth, canvasHeight)
       : null,
@@ -227,11 +267,28 @@ export function renderFrame(
   videoSource: CanvasImageSource | null,
   layout: FrameLayoutDescriptor,
 ): void {
-  const { canvasWidth, canvasHeight, drawRect, safeArea } = layout;
+  const { canvasWidth, canvasHeight, drawRect, backdropRect, safeArea } = layout;
 
   ctx.save();
   ctx.fillStyle = "#09090b";
   ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+
+  if (backdropRect) {
+    ctx.fillStyle = "#18181b";
+    ctx.fillRect(0, 0, canvasWidth, canvasHeight);
+    if (videoSource) {
+      ctx.save();
+      ctx.globalAlpha = 0.28;
+      ctx.drawImage(
+        videoSource,
+        backdropRect.x,
+        backdropRect.y,
+        backdropRect.width,
+        backdropRect.height,
+      );
+      ctx.restore();
+    }
+  }
 
   if (videoSource) {
     ctx.drawImage(

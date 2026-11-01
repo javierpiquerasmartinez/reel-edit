@@ -1,6 +1,13 @@
 import { describe, expect, test } from "vitest";
 import { EditorSession } from "./index.js";
 
+const DEFAULT_TRANSFORM = {
+  scale: 1,
+  offsetX: 0,
+  offsetY: 0,
+  fitMode: "cover" as const,
+};
+
 describe("EditorSession", () => {
   test("initializes Timeline from Source Media with a single full-duration Clip spanning [0ms, sourceDurationMs]", () => {
     const session = EditorSession.fromSourceMedia({
@@ -28,6 +35,7 @@ describe("EditorSession", () => {
         timelineStartMs: 0,
         timelineEndMs: 12000,
         durationMs: 12000,
+        transform: DEFAULT_TRANSFORM,
       },
     ]);
   });
@@ -57,6 +65,7 @@ describe("EditorSession", () => {
         timelineStartMs: 0,
         timelineEndMs: 4000,
         durationMs: 4000,
+        transform: DEFAULT_TRANSFORM,
       },
       {
         id: "clip-2",
@@ -65,6 +74,7 @@ describe("EditorSession", () => {
         timelineStartMs: 4000,
         timelineEndMs: 10000,
         durationMs: 6000,
+        transform: DEFAULT_TRANSFORM,
       },
     ]);
 
@@ -111,6 +121,7 @@ describe("EditorSession", () => {
         timelineStartMs: 0,
         timelineEndMs: 3000,
         durationMs: 3000,
+        transform: DEFAULT_TRANSFORM,
       },
       {
         id: "clip-3",
@@ -119,6 +130,7 @@ describe("EditorSession", () => {
         timelineStartMs: 3000,
         timelineEndMs: 8000,
         durationMs: 5000,
+        transform: DEFAULT_TRANSFORM,
       },
     ]);
 
@@ -170,6 +182,7 @@ describe("EditorSession", () => {
         timelineStartMs: 0,
         timelineEndMs: 3000,
         durationMs: 3000,
+        transform: DEFAULT_TRANSFORM,
       },
       {
         id: "clip-2",
@@ -178,6 +191,7 @@ describe("EditorSession", () => {
         timelineStartMs: 3000,
         timelineEndMs: 7500,
         durationMs: 4500,
+        transform: DEFAULT_TRANSFORM,
       },
     ]);
 
@@ -226,6 +240,7 @@ describe("EditorSession", () => {
         timelineStartMs: 0,
         timelineEndMs: 4000,
         durationMs: 4000,
+        transform: DEFAULT_TRANSFORM,
       },
     ]);
 
@@ -260,6 +275,7 @@ describe("EditorSession", () => {
         timelineStartMs: 0,
         timelineEndMs: 10000,
         durationMs: 10000,
+        transform: DEFAULT_TRANSFORM,
       },
     ]);
 
@@ -267,5 +283,258 @@ describe("EditorSession", () => {
     session.dispatch({ type: "splitClip", timelineTimeMs: 2500 });
     expect(session.getState().canRedo).toBe(false);
     expect(session.redo()).toBe(false);
+  });
+
+  test("setClipTransform updates framing (cover/contain) and Punch-in zoom/offset on one or more Clips and preserves transform across splits", () => {
+    const session = EditorSession.fromSourceMedia({
+      id: "source-1",
+      fileName: "landscape-interview.mp4",
+      durationMs: 9000,
+      width: 1920,
+      height: 1080,
+    });
+
+    session.dispatch({ type: "splitClip", timelineTimeMs: 3000 });
+    session.dispatch({ type: "splitClip", timelineTimeMs: 6000 });
+
+    // Switch all 3 clips to "contain" framing mode
+    const fitRes = session.dispatch({
+      type: "setClipTransform",
+      clipIds: ["clip-1", "clip-2", "clip-3"],
+      fitMode: "contain",
+    });
+    expect(fitRes.applied).toBe(true);
+    expect(
+      session.getState().timeline.clips.map((c) => c.transform.fitMode),
+    ).toEqual(["contain", "contain", "contain"]);
+
+    // Apply a Punch-in zoom (scale: 1.35, offsetX: -40, offsetY: 25) to clip-2 only
+    const punchInRes = session.dispatch({
+      type: "setClipTransform",
+      clipIds: ["clip-2"],
+      scale: 1.35,
+      offsetX: -40,
+      offsetY: 25,
+    });
+    expect(punchInRes.applied).toBe(true);
+
+    const clipsAfterPunchIn = session.getState().timeline.clips;
+    expect(clipsAfterPunchIn[0]?.transform).toEqual({
+      scale: 1,
+      offsetX: 0,
+      offsetY: 0,
+      fitMode: "contain",
+    });
+    expect(clipsAfterPunchIn[1]?.transform).toEqual({
+      scale: 1.35,
+      offsetX: -40,
+      offsetY: 25,
+      fitMode: "contain",
+    });
+
+    // Splitting a transformed Clip preserves its transform on both halves
+    session.dispatch({ type: "splitClip", timelineTimeMs: 4500 });
+    const afterSplit = session.getState().timeline.clips;
+    expect(afterSplit[1]?.transform).toEqual({
+      scale: 1.35,
+      offsetX: -40,
+      offsetY: 25,
+      fitMode: "contain",
+    });
+    expect(afterSplit[2]?.transform).toEqual({
+      scale: 1.35,
+      offsetX: -40,
+      offsetY: 25,
+      fitMode: "contain",
+    });
+  });
+
+  test("reorderClip moves a Clip to a new index and recalculates contiguous Timeline Time intervals without gaps", () => {
+    const session = EditorSession.fromSourceMedia({
+      id: "source-1",
+      fileName: "talking-head.mp4",
+      durationMs: 12000,
+      width: 1080,
+      height: 1920,
+    });
+
+    // Split into 3 clips: clip-1 [0..2000] (2s), clip-2 [2000..7000] (5s), clip-3 [7000..12000] (5s)
+    session.dispatch({ type: "splitClip", timelineTimeMs: 2000 });
+    session.dispatch({ type: "splitClip", timelineTimeMs: 7000 });
+
+    // Move clip-3 (source [7000..12000], duration 5000ms) to index 0
+    const reorderRes = session.dispatch({
+      type: "reorderClip",
+      clipId: "clip-3",
+      targetIndex: 0,
+    });
+    expect(reorderRes.applied).toBe(true);
+
+    const state = session.getState();
+    expect(state.timeline.durationMs).toBe(12000);
+    expect(state.timeline.clips).toEqual([
+      {
+        id: "clip-3",
+        sourceStartMs: 7000,
+        sourceEndMs: 12000,
+        timelineStartMs: 0,
+        timelineEndMs: 5000,
+        durationMs: 5000,
+        transform: DEFAULT_TRANSFORM,
+      },
+      {
+        id: "clip-1",
+        sourceStartMs: 0,
+        sourceEndMs: 2000,
+        timelineStartMs: 5000,
+        timelineEndMs: 7000,
+        durationMs: 2000,
+        transform: DEFAULT_TRANSFORM,
+      },
+      {
+        id: "clip-2",
+        sourceStartMs: 2000,
+        sourceEndMs: 7000,
+        timelineStartMs: 7000,
+        timelineEndMs: 12000,
+        durationMs: 5000,
+        transform: DEFAULT_TRANSFORM,
+      },
+    ]);
+
+    // Reordering to the same index or out-of-bounds index is rejected
+    expect(
+      session.dispatch({
+        type: "reorderClip",
+        clipId: "clip-3",
+        targetIndex: 0,
+      }).applied,
+    ).toBe(false);
+    expect(
+      session.dispatch({
+        type: "reorderClip",
+        clipId: "clip-3",
+        targetIndex: 5,
+      }).applied,
+    ).toBe(false);
+  });
+
+  test("duplicateClipAsHook inserts a duplicated Hook Clip at 0ms Timeline Time, shifts existing Clips forward, and supports Undo/Redo across transform, reorder, and Hook operations", () => {
+    const session = EditorSession.fromSourceMedia({
+      id: "source-1",
+      fileName: "podcast-reel.mp4",
+      durationMs: 10000,
+      width: 1920,
+      height: 1080,
+    });
+
+    // Split into clip-1 [0..4000] and clip-2 [4000..10000]
+    session.dispatch({ type: "splitClip", timelineTimeMs: 4000 });
+
+    // Apply Punch-in and contain framing to clip-2
+    session.dispatch({
+      type: "setClipTransform",
+      clipIds: ["clip-2"],
+      fitMode: "contain",
+      scale: 1.25,
+      offsetX: 15,
+      offsetY: -20,
+    });
+
+    // Promote a 2500ms high-impact Clip range [6000..8500] from clip-2 to 0ms Timeline Time as an opening Hook
+    const hookRes = session.dispatch({
+      type: "duplicateClipAsHook",
+      sourceStartMs: 6000,
+      sourceEndMs: 8500,
+    });
+    expect(hookRes.applied).toBe(true);
+
+    const afterHook = session.getState();
+    expect(afterHook.timeline.durationMs).toBe(12500);
+    expect(afterHook.timeline.clips).toEqual([
+      {
+        id: "clip-3",
+        sourceStartMs: 6000,
+        sourceEndMs: 8500,
+        timelineStartMs: 0,
+        timelineEndMs: 2500,
+        durationMs: 2500,
+        transform: {
+          scale: 1.25,
+          offsetX: 15,
+          offsetY: -20,
+          fitMode: "contain",
+        },
+      },
+      {
+        id: "clip-1",
+        sourceStartMs: 0,
+        sourceEndMs: 4000,
+        timelineStartMs: 2500,
+        timelineEndMs: 6500,
+        durationMs: 4000,
+        transform: DEFAULT_TRANSFORM,
+      },
+      {
+        id: "clip-2",
+        sourceStartMs: 4000,
+        sourceEndMs: 10000,
+        timelineStartMs: 6500,
+        timelineEndMs: 12500,
+        durationMs: 6000,
+        transform: {
+          scale: 1.25,
+          offsetX: 15,
+          offsetY: -20,
+          fitMode: "contain",
+        },
+      },
+    ]);
+
+    // Reorder clip-2 before clip-1 (index 1)
+    session.dispatch({
+      type: "reorderClip",
+      clipId: "clip-2",
+      targetIndex: 1,
+    });
+    expect(session.getState().timeline.clips.map((c) => c.id)).toEqual([
+      "clip-3",
+      "clip-2",
+      "clip-1",
+    ]);
+
+    // Undo reorderClip -> back to [clip-3, clip-1, clip-2]
+    expect(session.undo()).toBe(true);
+    expect(session.getState().timeline.clips.map((c) => c.id)).toEqual([
+      "clip-3",
+      "clip-1",
+      "clip-2",
+    ]);
+
+    // Undo duplicateClipAsHook -> back to [clip-1, clip-2] with duration 10000ms
+    expect(session.undo()).toBe(true);
+    expect(session.getState().timeline.durationMs).toBe(10000);
+    expect(session.getState().timeline.clips.map((c) => c.id)).toEqual([
+      "clip-1",
+      "clip-2",
+    ]);
+
+    // Undo setClipTransform -> clip-2 returns to DEFAULT_TRANSFORM
+    expect(session.undo()).toBe(true);
+    expect(session.getState().timeline.clips[1]?.transform).toEqual(
+      DEFAULT_TRANSFORM,
+    );
+
+    // Redo all three operations
+    expect(session.redo()).toBe(true);
+    expect(session.redo()).toBe(true);
+    expect(session.redo()).toBe(true);
+    expect(session.getState().timeline.durationMs).toBe(12500);
+    expect(session.getState().timeline.clips.map((c) => c.id)).toEqual([
+      "clip-3",
+      "clip-2",
+      "clip-1",
+    ]);
+    expect(session.getState().timeline.clips[0]?.transform.scale).toBe(1.25);
   });
 });

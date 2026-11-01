@@ -96,4 +96,68 @@ describe("Reel Edit Web Workspace (Issue 01)", () => {
     expect(screen.queryByTestId("timeline-clip-clip-2")).toBeNull();
     expect(screen.getByTestId("timeline-duration").textContent).toBe("00:03.000");
   });
+
+  test("switches Clip framing (cover/contain), applies Punch-in zoom and offsets, reorders Clips, and promotes an opening Hook with Undo/Redo", () => {
+    render(<App />);
+
+    const fileInput = screen.getByLabelText(/import source media/i);
+    const fakeVideoFile = new File(["video-bytes"], "interview.mp4", {
+      type: "video/mp4",
+    });
+    fireEvent.change(fileInput, { target: { files: [fakeVideoFile] } });
+
+    // Split into 2 clips at 4000ms: clip-1 [0..4000] and clip-2 [4000..12000]
+    const scrubber = screen.getByLabelText(/timeline playhead/i);
+    fireEvent.change(scrubber, { target: { value: "4000" } });
+    fireEvent.keyDown(window, { key: "s" });
+
+    // Select clip-2 and switch framing to "contain"
+    fireEvent.click(screen.getByTestId("timeline-clip-clip-2"));
+    fireEvent.click(screen.getByRole("button", { name: /^contain$/i }));
+    expect(screen.getByTestId("clip-badge-clip-2").textContent).toContain(
+      "contain",
+    );
+
+    // Apply Punch-in zoom (scale 1.35, offsetX -30, offsetY 20) to selected clip-2
+    fireEvent.change(screen.getByLabelText(/punch-in scale/i), {
+      target: { value: "1.35" },
+    });
+    fireEvent.change(screen.getByLabelText(/offset x/i), {
+      target: { value: "-30" },
+    });
+    fireEvent.change(screen.getByLabelText(/offset y/i), {
+      target: { value: "20" },
+    });
+    expect(screen.getByTestId("clip-badge-clip-2").textContent).toContain(
+      "1.35×",
+    );
+
+    // Reorder clip-2 earlier on the Timeline (to index 0)
+    fireEvent.click(screen.getByRole("button", { name: /move clip-2 earlier/i }));
+    const reorderedClips = screen.getAllByTestId(/^timeline-clip-clip-/);
+    expect(reorderedClips.map((el) => el.getAttribute("data-testid"))).toEqual([
+      "timeline-clip-clip-2",
+      "timeline-clip-clip-1",
+    ]);
+
+    // Select clip-1 and promote it as an opening Hook at 0ms Timeline Time
+    fireEvent.click(screen.getByTestId("timeline-clip-clip-1"));
+    fireEvent.click(
+      screen.getByRole("button", { name: /promote as opening hook/i }),
+    );
+
+    // Hook clip-3 (duration 4000ms) is inserted at index 0 -> total duration becomes 16000ms
+    expect(screen.getByTestId("timeline-duration").textContent).toBe("00:16.000");
+    const clipsAfterHook = screen.getAllByTestId(/^timeline-clip-clip-/);
+    expect(clipsAfterHook.map((el) => el.getAttribute("data-testid"))).toEqual([
+      "timeline-clip-clip-3",
+      "timeline-clip-clip-2",
+      "timeline-clip-clip-1",
+    ]);
+
+    // Undo Hook promotion -> duration returns to 12000ms
+    fireEvent.keyDown(window, { key: "z", metaKey: true });
+    expect(screen.getByTestId("timeline-duration").textContent).toBe("00:12.000");
+    expect(screen.queryByTestId("timeline-clip-clip-3")).toBeNull();
+  });
 });

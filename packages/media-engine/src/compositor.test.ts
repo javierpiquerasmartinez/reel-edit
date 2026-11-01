@@ -118,4 +118,125 @@ describe("media-engine 9:16 frame compositor descriptor", () => {
       reachedEnd: true,
     });
   });
+
+  test("computes cover and contain framing rects for both 16:9 horizontal and 9:16 vertical Source Media", () => {
+    const horizontalSession = EditorSession.fromSourceMedia({
+      id: "source-h",
+      fileName: "landscape-16x9.mp4",
+      durationMs: 8000,
+      width: 1920,
+      height: 1080,
+    });
+
+    // Default cover framing on 1920x1080 source into 1080x1920 canvas
+    const coverHorizontal = resolveFrameLayout(horizontalSession.getState(), 1000);
+    expect(coverHorizontal.transform.fitMode).toBe("cover");
+    expect(coverHorizontal.drawRect).toEqual({
+      x: -1166,
+      y: 0,
+      width: 3413,
+      height: 1920,
+    });
+    expect(coverHorizontal.backdropRect).toBeNull();
+
+    // Switch to contain framing on 1920x1080 source into 1080x1920 canvas
+    horizontalSession.dispatch({
+      type: "setClipTransform",
+      clipIds: ["clip-1"],
+      fitMode: "contain",
+    });
+    const containHorizontal = resolveFrameLayout(
+      horizontalSession.getState(),
+      1000,
+    );
+    expect(containHorizontal.transform.fitMode).toBe("contain");
+    expect(containHorizontal.drawRect).toEqual({
+      x: 0,
+      y: 656,
+      width: 1080,
+      height: 608,
+    });
+    expect(containHorizontal.backdropRect).toEqual({
+      x: -1166,
+      y: 0,
+      width: 3413,
+      height: 1920,
+    });
+
+    // Vertical 9:16 source (1080x1920) fills 1080x1920 in both cover and contain modes at 1.0x scale
+    const verticalSession = EditorSession.fromSourceMedia({
+      id: "source-v",
+      fileName: "vertical-9x16.mp4",
+      durationMs: 8000,
+      width: 1080,
+      height: 1920,
+    });
+    expect(resolveFrameLayout(verticalSession.getState(), 500).drawRect).toEqual({
+      x: 0,
+      y: 0,
+      width: 1080,
+      height: 1920,
+    });
+    verticalSession.dispatch({
+      type: "setClipTransform",
+      clipIds: ["clip-1"],
+      fitMode: "contain",
+    });
+    expect(resolveFrameLayout(verticalSession.getState(), 500).drawRect).toEqual({
+      x: 0,
+      y: 0,
+      width: 1080,
+      height: 1920,
+    });
+  });
+
+  test("applies Punch-in zoom (scale, offsetX, offsetY) and reflects Hook and reorder operations at the compositor seam", () => {
+    const session = EditorSession.fromSourceMedia({
+      id: "source-1",
+      fileName: "talking-head.mp4",
+      durationMs: 10000,
+      width: 1080,
+      height: 1920,
+    });
+
+    // Split at 4000ms -> clip-1 [0..4000], clip-2 [4000..10000]
+    session.dispatch({ type: "splitClip", timelineTimeMs: 4000 });
+
+    // Apply Punch-in zoom (scale: 1.5, offsetX: -40, offsetY: 60) to clip-2
+    session.dispatch({
+      type: "setClipTransform",
+      clipIds: ["clip-2"],
+      scale: 1.5,
+      offsetX: -40,
+      offsetY: 60,
+    });
+
+    // At 5000ms Timeline Time (inside clip-2), drawRect reflects 1.5x scale and pan offsets
+    const zoomedLayout = resolveFrameLayout(session.getState(), 5000);
+    expect(zoomedLayout.activeClip.id).toBe("clip-2");
+    expect(zoomedLayout.drawRect).toEqual({
+      x: -310,
+      y: -420,
+      width: 1620,
+      height: 2880,
+    });
+
+    // Promote [7000..9000] from clip-2 as an opening Hook at 0ms Timeline Time
+    session.dispatch({
+      type: "duplicateClipAsHook",
+      sourceStartMs: 7000,
+      sourceEndMs: 9000,
+    });
+
+    // At 500ms Timeline Time, compositor resolves the Hook clip (clip-3) at 7500ms Source Time with inherited Punch-in
+    const hookLayout = resolveFrameLayout(session.getState(), 500);
+    expect(hookLayout.activeClip.id).toBe("clip-3");
+    expect(hookLayout.sourceTimeMs).toBe(7500);
+    expect(hookLayout.drawRect).toEqual({
+      x: -310,
+      y: -420,
+      width: 1620,
+      height: 2880,
+    });
+  });
 });

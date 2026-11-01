@@ -4,10 +4,10 @@
 
 **Blocked by:** 01: Monorepo Scaffold, Source Media Import, 9:16 Player & Split/Ripple-Delete Clip Editing
 
-**Status:** ready-for-agent
+**Status:** resolved
 
-- [ ] Creators can switch a **Clip** (or all **Clips**) between `cover` and `contain` framing modes via `setClipTransform`, and the `9:16` canvas compositor renders both horizontal (`16:9`) and vertical (`9:16`) **Source Media** with the selected framing.
-- [ ] Creators can apply a **Punch-in** zoom (`scale`, `offsetX`, `offsetY`) to one or more selected **Clips** via `setClipTransform`, with immediate visual feedback in the `9:16` canvas player.
-- [ ] Creators can reorder **Clips** on the **Timeline** via `reorderClip`, automatically recalculating every **Clip**'s **Timeline Time** interval without gaps.
-- [ ] Creators can promote a segment to the beginning of the Reel as an opening **Hook** (`duplicateClipAsHook`), inserting the duplicated **Clip** at `0ms` **Timeline Time** and shifting existing **Clips** forward.
-- [ ] All transform, reorder, and **Hook** operations are reversible via `Undo`/`Redo` and covered by tests at the `EditorSession` and frame-compositor descriptor seams.
+- [x] Creators can switch a **Clip** (or all **Clips**) between `cover` and `contain` framing modes via `setClipTransform`, and the `9:16` canvas compositor renders both horizontal (`16:9`) and vertical (`9:16`) **Source Media** with the selected framing.
+- [x] Creators can apply a **Punch-in** zoom (`scale`, `offsetX`, `offsetY`) to one or more selected **Clips** via `setClipTransform`, with immediate visual feedback in the `9:16` canvas player.
+- [x] Creators can reorder **Clips** on the **Timeline** via `reorderClip`, automatically recalculating every **Clip**'s **Timeline Time** interval without gaps.
+- [x] Creators can promote a segment to the beginning of the Reel as an opening **Hook** (`duplicateClipAsHook`), inserting the duplicated **Clip** at `0ms` **Timeline Time** and shifting existing **Clips** forward.
+- [x] All transform, reorder, and **Hook** operations are reversible via `Undo`/`Redo` and covered by tests at the `EditorSession` and frame-compositor descriptor seams.
