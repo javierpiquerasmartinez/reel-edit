@@ -365,7 +365,7 @@ const LOCAL_WHISPER_WORKER_SOURCE = `
 self.onmessage = async (event) => {
   const { audio, model, language } = event.data;
   try {
-    const transformers = await import("@huggingface/transformers");
+    const transformers = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3/+esm");
     const transcriber = await transformers.pipeline(
       "automatic-speech-recognition",
       model || "onnx-community/whisper-tiny.en",

@@ -727,9 +727,10 @@ export function renderFrame(
         : activeCaption.text.length * fontSize * 0.52;
     const pillPadX = Math.round(32 * scaleX);
     const pillPadY = Math.round(22 * scaleY);
+    const maxPillWidth = canvasWidth - Math.round(96 * scaleX);
     const pillWidth = Math.min(
-      canvasWidth - Math.round(96 * scaleX),
-      Math.round(measuredWidth + pillPadX * 2),
+      maxPillWidth,
+      Math.max(Math.round(220 * scaleX), Math.round(measuredWidth + pillPadX * 2)),
     );
     const pillHeight = Math.round(fontSize + pillPadY * 2);
     const pillX = Math.round(activeCaption.centerX - pillWidth / 2);
@@ -737,15 +738,22 @@ export function renderFrame(
       activeCaption.baselineY - fontSize - pillPadY * 0.65,
     );
 
-    ctx.fillStyle = "rgba(9, 9, 11, 0.78)";
+    ctx.fillStyle = "rgba(9, 9, 11, 0.82)";
     ctx.fillRect(pillX, pillY, pillWidth, pillHeight);
 
+    ctx.save();
     ctx.fillStyle = "#ffffff";
-    const textX = Math.max(
-      pillX + pillPadX,
-      Math.round(activeCaption.centerX - measuredWidth / 2),
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const textCenterY = Math.round(pillY + pillHeight / 2);
+    const maxTextWidth = Math.max(40, pillWidth - pillPadX * 2);
+    ctx.fillText(
+      activeCaption.text,
+      activeCaption.centerX,
+      textCenterY,
+      maxTextWidth,
     );
-    ctx.fillText(activeCaption.text, textX, activeCaption.baselineY);
+    ctx.restore();
   }
 
   if (safeArea) {

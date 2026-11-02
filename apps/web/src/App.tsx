@@ -75,6 +75,7 @@ export function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sourceFileRef = useRef<File | null>(null);
   const decodedEnvelopePromiseRef = useRef<Promise<AudioEnvelope> | null>(null);
+  const resolvedEnvelopeRef = useRef<AudioEnvelope | null>(null);
   const activeClipIdRef = useRef<string>("clip-1");
   const timelineTimeMsRef = useRef<number>(0);
   timelineTimeMsRef.current = timelineTimeMs;
@@ -132,10 +133,16 @@ export function App() {
       setEditingWordText("");
       setStatusMessage(null);
 
+      const existingEnvelope = resolvedEnvelopeRef.current;
+      if (existingEnvelope && existingEnvelope.peaks.length > 0) {
+        nextSession.setAudioEnvelope(existingEnvelope);
+      }
+
       const envelopePromise = decodedEnvelopePromiseRef.current;
       if (envelopePromise) {
         void envelopePromise.then((decodedEnvelope) => {
           if (decodedEnvelope.peaks.length > 0) {
+            resolvedEnvelopeRef.current = decodedEnvelope;
             nextSession.setAudioEnvelope(decodedEnvelope);
           }
         });
@@ -151,6 +158,7 @@ export function App() {
     }
 
     sourceFileRef.current = file;
+    resolvedEnvelopeRef.current = null;
     decodedEnvelopePromiseRef.current = decodeSourceMediaAudioEnvelope(file, {
       bucketDurationMs: 100,
     });
@@ -699,9 +707,9 @@ export function App() {
     selectedClipIds.length < (editorState?.timeline.clips.length ?? 0);
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col">
+    <div className="min-h-screen lg:h-screen lg:overflow-hidden bg-zinc-950 text-zinc-100 flex flex-col">
       {/* Top Header Bar */}
-      <header className="h-14 border-b border-zinc-800 px-6 flex items-center justify-between bg-zinc-900/60">
+      <header className="h-14 shrink-0 border-b border-zinc-800 px-6 flex items-center justify-between bg-zinc-900/60">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-sky-500/20 border border-sky-400/40 flex items-center justify-center text-sky-400">
             <Film className="w-4 h-4" />
@@ -777,11 +785,11 @@ export function App() {
           </label>
         </main>
       ) : (
-        <main className="flex-1 grid grid-rows-[1fr_auto] overflow-hidden">
+        <main className="flex-1 min-h-0 grid grid-rows-[1fr_auto] overflow-hidden">
           {/* Upper Zone: Source Media Info + 9:16 Vertical Canvas Player + Transcript Panel */}
-          <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr_340px] gap-6 p-6 overflow-y-auto">
+          <div className="min-h-0 grid grid-cols-1 lg:grid-cols-[290px_1fr_340px] gap-4 p-4 overflow-y-auto lg:overflow-hidden">
             {/* Left Inspector: Source Media & Active Clip Metadata */}
-            <aside className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-4 self-start">
+            <aside className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-4 self-start lg:max-h-full lg:overflow-y-auto">
               <div>
                 <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">
                   Source Media
@@ -1046,8 +1054,8 @@ export function App() {
             </aside>
 
             {/* Center: 9:16 Vertical WYSIWYG Canvas Player */}
-            <section className="flex flex-col items-center justify-center gap-4">
-              <div className="relative aspect-[9/16] h-[420px] max-h-[60vh] rounded-2xl overflow-hidden border border-zinc-800 bg-zinc-950 shadow-2xl">
+            <section className="min-h-0 flex flex-col items-center justify-center gap-3">
+              <div className="relative w-[270px] h-[480px] shrink-0 rounded-2xl overflow-hidden border border-zinc-800 bg-zinc-950 shadow-2xl">
                 {videoUrl && (
                   <video
                     ref={videoRef}
@@ -1057,8 +1065,16 @@ export function App() {
                     onLoadedData={() =>
                       drawCurrentFrame(timelineTimeMsRef.current)
                     }
+                    onCanPlay={() =>
+                      drawCurrentFrame(timelineTimeMsRef.current)
+                    }
                     onSeeked={() => drawCurrentFrame(timelineTimeMsRef.current)}
-                    className="hidden"
+                    onTimeUpdate={() => {
+                      if (!isPlaying) {
+                        drawCurrentFrame(timelineTimeMsRef.current);
+                      }
+                    }}
+                    className="pointer-events-none absolute inset-0 w-full h-full opacity-0"
                     playsInline
                   />
                 )}
@@ -1067,7 +1083,7 @@ export function App() {
                   width={CANVAS_WIDTH}
                   height={CANVAS_HEIGHT}
                   data-testid="player-canvas"
-                  className="w-full h-full object-contain"
+                  className="block w-full h-full"
                 />
 
                 {currentLayout?.activeCaption && (
@@ -1139,7 +1155,7 @@ export function App() {
             {/* Right Panel: Hybrid Transcription & Interactive Transcript Editor */}
             <aside
               aria-label="Transcript"
-              className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-4 self-start"
+              className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-4 self-start lg:max-h-full lg:overflow-y-auto"
             >
               <div className="flex items-center justify-between gap-2">
                 <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
@@ -1308,7 +1324,7 @@ export function App() {
           {/* Lower Zone: Non-Destructive Timeline & Edit Command Toolbar */}
           <section
             aria-label="Timeline"
-            className="border-t border-zinc-800 bg-zinc-900/70 p-5 space-y-4"
+            className="shrink-0 border-t border-zinc-800 bg-zinc-900/70 p-4 space-y-3"
           >
             {/* Timeline Action Toolbar */}
             <div className="flex flex-wrap items-center justify-between gap-4">
