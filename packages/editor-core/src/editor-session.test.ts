@@ -948,4 +948,145 @@ describe("EditorSession", () => {
       session.getState().timeline.captions[0]?.words[1]?.emphasis,
     ).toBe(true);
   });
+
+  test("updateCaptionStyle applies built-in Caption Presets, overrides individual style properties, dynamically re-groups Captions via maxWordsPerCaption and pauseBreakMs across punctuation and Clip boundaries, and supports Undo/Redo", () => {
+    const session = EditorSession.fromSourceMedia(
+      {
+        id: "source-1",
+        fileName: "captions-style.mp4",
+        durationMs: 10000,
+        width: 1080,
+        height: 1920,
+      },
+      {
+        transcript: [
+          { id: "w-1", text: "Stop", sourceStartMs: 200, sourceEndMs: 500 },
+          { id: "w-2", text: "editing", sourceStartMs: 550, sourceEndMs: 900 },
+          { id: "w-3", text: "slowly.", sourceStartMs: 950, sourceEndMs: 1400 },
+          { id: "w-4", text: "Use", sourceStartMs: 1500, sourceEndMs: 1800 },
+          { id: "w-5", text: "fast", sourceStartMs: 1850, sourceEndMs: 2200 },
+          // 600ms pause gap before w-6 (2800 - 2200 = 600ms)
+          { id: "w-6", text: "automated", sourceStartMs: 2800, sourceEndMs: 3300 },
+          { id: "w-7", text: "captions", sourceStartMs: 3350, sourceEndMs: 3800 },
+          { id: "w-8", text: "today!", sourceStartMs: 3850, sourceEndMs: 4400 },
+        ],
+      },
+    );
+
+    // Initial state uses default preset ("flat") and default grouping (maxWordsPerCaption: 4, pauseBreakMs: 400)
+    const initial = session.getState();
+    expect(initial.captionStyle.presetId).toBe("flat");
+    expect(initial.captionStyle.fontFamily).toBe("Inter");
+    expect(initial.captionGrouping).toEqual({
+      maxWordsPerCaption: 4,
+      pauseBreakMs: 400,
+    });
+    // Default grouping produces:
+    // 1. "Stop editing slowly." (3 words, split after terminal period on "slowly.")
+    // 2. "Use fast" (2 words, split before 600ms pause > 400ms)
+    // 3. "automated captions today!" (3 words)
+    expect(initial.timeline.captions.map((c) => c.text)).toEqual([
+      "Stop editing slowly.",
+      "Use fast",
+      "automated captions today!",
+    ]);
+
+    // 1. Apply built-in "hormozi-highlight" Caption Preset
+    const presetRes = session.dispatch({
+      type: "updateCaptionStyle",
+      presetId: "hormozi-highlight",
+    });
+    expect(presetRes.applied).toBe(true);
+    expect(session.getState().captionStyle).toMatchObject({
+      presetId: "hormozi-highlight",
+      animationMode: "hormozi-highlight",
+      fontFamily: "Montserrat",
+      uppercase: true,
+      activeWordColor: "#facc15",
+    });
+
+    // 2. Customize individual style properties + grouping (maxWordsPerCaption: 2, pauseBreakMs: 1000)
+    const customRes = session.dispatch({
+      type: "updateCaptionStyle",
+      styleOverrides: {
+        fontFamily: "Bangers",
+        fontSize: 76,
+        uppercase: false,
+        primaryColor: "#f8fafc",
+        activeWordColor: "#38bdf8",
+        emphasisColor: "#f43f5e",
+        strokeColor: "#09090b",
+        strokeWidth: 6,
+        shadow: false,
+        backgroundMode: "box",
+        backgroundColor: "rgba(15, 23, 42, 0.9)",
+        positionY: 0.65,
+      },
+      grouping: {
+        maxWordsPerCaption: 2,
+        pauseBreakMs: 1000,
+      },
+    });
+    expect(customRes.applied).toBe(true);
+
+    const customState = session.getState();
+    expect(customState.captionStyle).toEqual({
+      presetId: "hormozi-highlight",
+      animationMode: "hormozi-highlight",
+      fontFamily: "Bangers",
+      fontSize: 76,
+      uppercase: false,
+      primaryColor: "#f8fafc",
+      activeWordColor: "#38bdf8",
+      emphasisColor: "#f43f5e",
+      strokeColor: "#09090b",
+      strokeWidth: 6,
+      shadow: false,
+      backgroundMode: "box",
+      backgroundColor: "rgba(15, 23, 42, 0.9)",
+      positionY: 0.65,
+    });
+    expect(customState.captionGrouping).toEqual({
+      maxWordsPerCaption: 2,
+      pauseBreakMs: 1000,
+    });
+    // With maxWordsPerCaption = 2 and pauseBreakMs = 1000:
+    // ["Stop editing", "slowly.", "Use fast", "automated captions", "today!"]
+    expect(customState.timeline.captions.map((c) => c.text)).toEqual([
+      "Stop editing",
+      "slowly.",
+      "Use fast",
+      "automated captions",
+      "today!",
+    ]);
+
+    // 3. Undo reverts the custom overrides and grouping back to "hormozi-highlight" with 3 captions
+    expect(session.undo()).toBe(true);
+    expect(session.getState().captionStyle.fontFamily).toBe("Montserrat");
+    expect(session.getState().captionStyle.uppercase).toBe(true);
+    expect(session.getState().captionGrouping.maxWordsPerCaption).toBe(4);
+    expect(session.getState().timeline.captions.map((c) => c.text)).toEqual([
+      "Stop editing slowly.",
+      "Use fast",
+      "automated captions today!",
+    ]);
+
+    // 4. Undo again reverts back to initial "flat" preset
+    expect(session.undo()).toBe(true);
+    expect(session.getState().captionStyle.presetId).toBe("flat");
+    expect(session.getState().captionStyle.fontFamily).toBe("Inter");
+
+    // 5. Redo twice restores both steps
+    expect(session.redo()).toBe(true);
+    expect(session.getState().captionStyle.presetId).toBe("hormozi-highlight");
+    expect(session.redo()).toBe(true);
+    expect(session.getState().captionStyle.fontFamily).toBe("Bangers");
+    expect(session.getState().timeline.captions.map((c) => c.text)).toEqual([
+      "Stop editing",
+      "slowly.",
+      "Use fast",
+      "automated captions",
+      "today!",
+    ]);
+  });
 });

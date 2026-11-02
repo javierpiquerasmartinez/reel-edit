@@ -7,6 +7,7 @@ import {
   evaluatePlaybackStep,
   extract16kHzMonoAudio,
   extractAudioEnvelopeFromSamples,
+  preloadReelFonts,
   projectSilencePreview,
   renderFrame,
   resolveFrameLayout,
@@ -662,5 +663,148 @@ describe("media-engine 9:16 frame compositor descriptor", () => {
         String(call[0]).includes("Zero latency editor."),
       ),
     ).toBe(true);
+  });
+
+  test("preloadReelFonts preloads the curated Reel font catalog via browser Font Loading API and resolveFrameLayout deterministically computes Flat, Hormozi Highlight, Word-by-Word Pop, and Word Emphasis styling", async () => {
+    const loadSpy = vi.fn(async () => []);
+    const fontResult = await preloadReelFonts({
+      fontFaceSet: { load: loadSpy },
+    });
+    expect(fontResult.status).toBe("loaded");
+    expect(fontResult.loadedFamilies).toEqual([
+      "Montserrat",
+      "Anton",
+      "Inter",
+      "Bebas Neue",
+      "Poppins",
+      "Bangers",
+    ]);
+    expect(loadSpy).toHaveBeenCalledTimes(6);
+
+    const session = EditorSession.fromSourceMedia(
+      {
+        id: "source-1",
+        fileName: "animated-captions.mp4",
+        durationMs: 8000,
+        width: 1080,
+        height: 1920,
+      },
+      {
+        transcript: [
+          { id: "w-1", text: "Build", sourceStartMs: 400, sourceEndMs: 800 },
+          {
+            id: "w-2",
+            text: "viral",
+            sourceStartMs: 900,
+            sourceEndMs: 1400,
+            emphasis: true,
+          },
+          { id: "w-3", text: "Reels.", sourceStartMs: 1500, sourceEndMs: 2100 },
+        ],
+      },
+    );
+
+    // 1. Flat Static preset ("flat"): static scale 1 on normal words, emphasisColor + scale boost on emphasized word
+    const flatLayout = resolveFrameLayout(session.getState(), 500);
+    expect(flatLayout.activeCaption?.animationMode).toBe("flat");
+    expect(flatLayout.activeCaption?.baselineY).toBe(Math.round(1920 * 0.72));
+    expect(flatLayout.activeCaption?.wordLayouts.map((w) => ({
+      displayText: w.displayText,
+      isActive: w.isActive,
+      emphasis: w.emphasis,
+      fillColor: w.fillColor,
+      highlightPill: w.highlightPill,
+      scale: w.scale,
+    }))).toEqual([
+      {
+        displayText: "Build",
+        isActive: true,
+        emphasis: false,
+        fillColor: "#ffffff",
+        highlightPill: false,
+        scale: 1,
+      },
+      {
+        displayText: "viral",
+        isActive: false,
+        emphasis: true,
+        fillColor: "#38bdf8",
+        highlightPill: false,
+        scale: 1.08,
+      },
+      {
+        displayText: "Reels.",
+        isActive: false,
+        emphasis: false,
+        fillColor: "#ffffff",
+        highlightPill: false,
+        scale: 1,
+      },
+    ]);
+
+    // 2. Hormozi Active-Word Highlight preset ("hormozi-highlight"): uppercase, active-word color/pill/scale highlight
+    session.dispatch({
+      type: "updateCaptionStyle",
+      presetId: "hormozi-highlight",
+    });
+
+    // At 500ms ("BUILD" is active, "VIRAL" is emphasized):
+    const hormoziAt500 = resolveFrameLayout(session.getState(), 500);
+    expect(hormoziAt500.activeCaption?.animationMode).toBe("hormozi-highlight");
+    expect(hormoziAt500.activeCaption?.displayText).toBe("BUILD VIRAL REELS.");
+    expect(hormoziAt500.activeCaption?.wordLayouts[0]).toMatchObject({
+      displayText: "BUILD",
+      isActive: true,
+      fillColor: "#facc15",
+      highlightPill: true,
+      scale: 1.12,
+    });
+    expect(hormoziAt500.activeCaption?.wordLayouts[1]).toMatchObject({
+      displayText: "VIRAL",
+      isActive: false,
+      emphasis: true,
+      fillColor: "#22c55e",
+      highlightPill: false,
+    });
+
+    // At 1100ms ("VIRAL" is both active AND emphasized):
+    const hormoziAt1100 = resolveFrameLayout(session.getState(), 1100);
+    expect(hormoziAt1100.activeCaption?.activeWordIndex).toBe(1);
+    expect(hormoziAt1100.activeCaption?.wordLayouts[1]).toMatchObject({
+      displayText: "VIRAL",
+      isActive: true,
+      emphasis: true,
+      fillColor: "#22c55e",
+      highlightPill: true,
+      scale: 1.18,
+    });
+
+    // 3. Word-by-Word Pop preset ("word-pop") + vertical positionY override (0.60):
+    // Deterministic spring-scaled entry curve based on elapsed ms since word.timelineStartMs
+    session.dispatch({
+      type: "updateCaptionStyle",
+      presetId: "word-pop",
+      styleOverrides: {
+        positionY: 0.6,
+      },
+    });
+
+    // w-3 ("Reels.") starts at 1500ms with 160ms entry pop window:
+    // - At 1500ms (0ms elapsed -> progress 0): entry scale 0.65
+    const popStart = resolveFrameLayout(session.getState(), 1500);
+    expect(popStart.activeCaption?.baselineY).toBe(Math.round(1920 * 0.6));
+    expect(popStart.activeCaption?.activeWordIndex).toBe(2);
+    expect(popStart.activeCaption?.animationProgress).toBe(0);
+    expect(popStart.activeCaption?.wordLayouts[2]?.scale).toBeCloseTo(0.65, 2);
+
+    // - At 1580ms (80ms elapsed -> progress 0.5): spring overshoot > 1.15
+    const popMid = resolveFrameLayout(session.getState(), 1580);
+    expect(popMid.activeCaption?.animationProgress).toBeCloseTo(0.5, 2);
+    expect(popMid.activeCaption?.wordLayouts[2]?.scale).toBeGreaterThan(1.15);
+
+    // - At 1700ms (200ms elapsed -> progress 1.0): settled to 1.0
+    const popSettled = resolveFrameLayout(session.getState(), 1700);
+    expect(popSettled.activeCaption?.animationProgress).toBe(1);
+    expect(popSettled.activeCaption?.wordLayouts[2]?.scale).toBeCloseTo(1.0, 2);
   });
 });

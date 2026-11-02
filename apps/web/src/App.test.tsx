@@ -409,4 +409,136 @@ describe("Reel Edit Web Workspace (Issue 01)", () => {
         .getAttribute("data-word-active"),
     ).toBe("true");
   });
+
+  test("preloads curated Reel fonts, applies Caption Presets, customizes style overrides, re-groups Captions on the Timeline caption track via maxWordsPerCaption and pauseBreakMs, and toggles Word Emphasis with Undo/Redo", async () => {
+    render(<App />);
+
+    // 1. Import Source Media and transcribe audio so Captions appear on the Timeline caption track
+    const fileInput = screen.getByLabelText(/import source media/i);
+    const fakeVideoFile = new File(["video-bytes"], "styled-reel.mp4", {
+      type: "video/mp4",
+    });
+    fireEvent.change(fileInput, { target: { files: [fakeVideoFile] } });
+
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          words: [
+            { word: "Build", start: 0.2, end: 0.6 },
+            { word: "engaging", start: 0.7, end: 1.2 },
+            { word: "vertical", start: 1.3, end: 1.8 },
+            { word: "Reels", start: 1.9, end: 2.4 },
+            { word: "with", start: 3.1, end: 3.5 },
+            { word: "instant", start: 3.6, end: 4.1 },
+            { word: "captions.", start: 4.2, end: 4.8 },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    fireEvent.change(screen.getByLabelText(/transcription provider/i), {
+      target: { value: "openai" },
+    });
+    fireEvent.change(screen.getByLabelText(/openai api key/i), {
+      target: { value: "sk-test-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /transcribe audio/i }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("timeline-caption-track")).toBeDefined();
+    });
+
+    // Default grouping (maxWordsPerCaption: 4, pauseBreakMs: 400):
+    // 700ms pause between "Reels" (2.4s) and "with" (3.1s) splits into 2 Caption blocks on the Timeline caption track
+    expect(screen.getAllByTestId(/^timeline-caption-caption-/)).toHaveLength(2);
+
+    // 2. Verify all 6 curated Reel fonts are selectable in the Captions panel
+    const fontSelect = screen.getByLabelText(
+      /caption font family/i,
+    ) as HTMLSelectElement;
+    const fontOptionValues = Array.from(fontSelect.options).map((o) => o.value);
+    expect(fontOptionValues).toEqual([
+      "Montserrat",
+      "Anton",
+      "Inter",
+      "Bebas Neue",
+      "Poppins",
+      "Bangers",
+    ]);
+
+    // 3. Apply "Hormozi Active-Word Highlight" preset and verify uppercase & font update
+    fireEvent.click(
+      screen.getByRole("button", { name: /hormozi active-word highlight/i }),
+    );
+    expect(fontSelect.value).toBe("Montserrat");
+    expect(
+      screen
+        .getByRole("button", { name: /uppercase captions/i })
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+    // Seek to 300ms so first caption is active on player overlay in uppercase
+    fireEvent.change(screen.getByLabelText(/timeline playhead/i), {
+      target: { value: "300" },
+    });
+    expect(screen.getByTestId("active-caption-overlay").textContent).toContain(
+      "BUILD ENGAGING VERTICAL REELS",
+    );
+
+    // 4. Customize individual style properties (fontFamily, fontSize, positionY, backgroundMode)
+    fireEvent.change(fontSelect, { target: { value: "Bangers" } });
+    expect(fontSelect.value).toBe("Bangers");
+
+    fireEvent.change(screen.getByLabelText(/caption font size/i), {
+      target: { value: "74" },
+    });
+    fireEvent.change(screen.getByLabelText(/caption vertical position/i), {
+      target: { value: "0.65" },
+    });
+    fireEvent.change(screen.getByLabelText(/caption background mode/i), {
+      target: { value: "box" },
+    });
+
+    // 5. Adjust maxWordsPerCaption to 2 -> dynamically re-groups the 7 words into 4 Captions on the Timeline caption track
+    fireEvent.change(screen.getByLabelText(/max words per caption/i), {
+      target: { value: "2" },
+    });
+    expect(screen.getAllByTestId(/^timeline-caption-caption-/)).toHaveLength(4);
+
+    // 6. Select word-2 ("engaging") in Transcript and toggle Word Emphasis
+    fireEvent.click(screen.getByTestId("transcript-word-word-2"));
+    const emphasisBtn = screen.getByRole("button", {
+      name: /toggle word emphasis/i,
+    });
+    expect(emphasisBtn.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(emphasisBtn);
+    expect(emphasisBtn.getAttribute("aria-pressed")).toBe("true");
+    expect(
+      screen
+        .getByTestId("transcript-word-word-2")
+        .getAttribute("data-word-emphasis"),
+    ).toBe("true");
+
+    // 7. Undo reverts Word Emphasis, and another Undo reverts maxWordsPerCaption back to 4 (2 Captions on Timeline)
+    fireEvent.keyDown(window, { key: "z", metaKey: true });
+    expect(
+      screen
+        .getByTestId("transcript-word-word-2")
+        .getAttribute("data-word-emphasis"),
+    ).toBe("false");
+
+    fireEvent.keyDown(window, { key: "z", metaKey: true });
+    expect(screen.getAllByTestId(/^timeline-caption-caption-/)).toHaveLength(2);
+
+    // Redo twice re-applies both the grouping change and Word Emphasis
+    fireEvent.keyDown(window, { key: "z", metaKey: true, shiftKey: true });
+    expect(screen.getAllByTestId(/^timeline-caption-caption-/)).toHaveLength(4);
+    fireEvent.keyDown(window, { key: "z", metaKey: true, shiftKey: true });
+    expect(
+      screen
+        .getByTestId("transcript-word-word-2")
+        .getAttribute("data-word-emphasis"),
+    ).toBe("true");
+  });
 });

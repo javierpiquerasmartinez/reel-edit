@@ -1,17 +1,27 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
+  CAPTION_PRESETS,
+  DEFAULT_CAPTION_GROUPING,
+  DEFAULT_CAPTION_STYLE,
   DEFAULT_CLIP_TRANSFORM,
   DEFAULT_SILENCE_CONFIG,
   EditorSession,
+  REEL_FONT_CATALOG,
   type AudioEnvelope,
+  type CaptionBackgroundMode,
+  type CaptionGroupingPatch,
+  type CaptionPresetId,
+  type CaptionStyleOverrides,
   type Clip,
   type ClipFitMode,
   type EditorState,
+  type ReelFontFamily,
   type SilenceDetectionConfig,
 } from "@reel-edit/editor-core";
 import {
   decodeSourceMediaAudioEnvelope,
   evaluatePlaybackStep,
+  preloadReelFonts,
   projectSilencePreview,
   renderFrame,
   resolveFrameLayout,
@@ -35,6 +45,7 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  Type,
   Undo2,
   Upload,
   ZoomIn,
@@ -84,6 +95,11 @@ export function App() {
   const activeClipIdRef = useRef<string>("clip-1");
   const timelineTimeMsRef = useRef<number>(0);
   timelineTimeMsRef.current = timelineTimeMs;
+
+  // Preload curated Reel fonts via browser Font Loading API on mount
+  useEffect(() => {
+    void preloadReelFonts();
+  }, []);
 
   // Subscribe to EditorSession state updates
   useEffect(() => {
@@ -640,6 +656,83 @@ export function App() {
     );
   }, [editingWordText, selectedWordRange, session]);
 
+  const handleToggleWordEmphasis = useCallback(() => {
+    if (!session || !editorState || !selectedWordRange) {
+      return;
+    }
+    const targetWord = editorState.projectedTranscriptWords.find(
+      (w) => w.id === selectedWordRange.startWordId,
+    );
+    if (!targetWord) {
+      return;
+    }
+    const nextEmphasis = !targetWord.emphasis;
+    const res = session.dispatch({
+      type: "updateWords",
+      updates: [
+        {
+          wordId: targetWord.id,
+          emphasis: nextEmphasis,
+        },
+      ],
+    });
+    setStatusMessage(
+      res.applied
+        ? `${nextEmphasis ? "Enabled" : "Disabled"} Word Emphasis on "${targetWord.text}"`
+        : (res.reason ?? null),
+    );
+  }, [editorState, selectedWordRange, session]);
+
+  const handleApplyCaptionPreset = useCallback(
+    (presetId: CaptionPresetId) => {
+      if (!session) {
+        return;
+      }
+      const res = session.dispatch({
+        type: "updateCaptionStyle",
+        presetId,
+      });
+      setStatusMessage(
+        res.applied
+          ? `Applied ${CAPTION_PRESETS[presetId].name} Caption Preset`
+          : (res.reason ?? null),
+      );
+    },
+    [session],
+  );
+
+  const handleUpdateCaptionStyleOverrides = useCallback(
+    (styleOverrides: CaptionStyleOverrides) => {
+      if (!session) {
+        return;
+      }
+      const res = session.dispatch({
+        type: "updateCaptionStyle",
+        styleOverrides,
+      });
+      setStatusMessage(
+        res.applied ? "Updated Caption style" : (res.reason ?? null),
+      );
+    },
+    [session],
+  );
+
+  const handleUpdateCaptionGrouping = useCallback(
+    (grouping: CaptionGroupingPatch) => {
+      if (!session) {
+        return;
+      }
+      const res = session.dispatch({
+        type: "updateCaptionStyle",
+        grouping,
+      });
+      setStatusMessage(
+        res.applied ? "Updated Caption word grouping" : (res.reason ?? null),
+      );
+    },
+    [session],
+  );
+
   const handleDeleteSelectedWords = useCallback(() => {
     if (!session || !selectedWordRange) {
       return;
@@ -719,6 +812,10 @@ export function App() {
     currentLayout?.activeClip ??
     null;
   const activeTransform = selectedClip?.transform ?? DEFAULT_CLIP_TRANSFORM;
+  const activeCaptionStyle =
+    editorState?.captionStyle ?? DEFAULT_CAPTION_STYLE;
+  const activeCaptionGrouping =
+    editorState?.captionGrouping ?? DEFAULT_CAPTION_GROUPING;
   const silencePreview = editorState
     ? projectSilencePreview(
         editorState.timeline,
@@ -1116,7 +1213,8 @@ export function App() {
                     data-testid="active-caption-overlay"
                     className="pointer-events-none sr-only"
                   >
-                    {currentLayout.activeCaption.text}
+                    {currentLayout.activeCaption.displayText ??
+                      currentLayout.activeCaption.text}
                   </div>
                 )}
 
@@ -1303,13 +1401,16 @@ export function App() {
                           type="button"
                           data-testid={`transcript-word-${word.id}`}
                           data-word-active={word.isActive ? "true" : "false"}
+                          data-word-emphasis={word.emphasis ? "true" : "false"}
                           onClick={(e) => handleWordClick(word, e.shiftKey)}
                           className={`rounded px-1.5 py-0.5 text-xs font-medium transition ${
                             !word.isActive
                               ? "line-through opacity-45 text-zinc-500 bg-zinc-900 border border-zinc-800/60"
                               : isWordSelected
                                 ? "bg-emerald-500/25 border border-emerald-400 text-emerald-100"
-                                : "bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-800"
+                                : word.emphasis
+                                  ? "bg-amber-500/20 border border-amber-400/70 text-amber-200"
+                                  : "bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-800"
                           }`}
                         >
                           {word.text}
@@ -1318,30 +1419,53 @@ export function App() {
                     })}
                   </div>
 
-                  {/* Word Text Correction & Phrase Ripple-Delete Controls */}
+                  {/* Word Text Correction, Word Emphasis & Phrase Ripple-Delete Controls */}
                   {selectedWordRange && (
                     <div className="space-y-2 pt-1">
                       {selectedWordRange.startWordId ===
                         selectedWordRange.endWordId && (
-                        <div className="flex items-end gap-1.5">
-                          <label className="flex-1 flex flex-col gap-1 text-[11px] text-zinc-400">
-                            <span>Edit Selected Word Text</span>
-                            <input
-                              aria-label="Edit selected word text"
-                              type="text"
-                              value={editingWordText}
-                              onChange={(e) =>
-                                setEditingWordText(e.target.value)
-                              }
-                              className="rounded-lg bg-zinc-950 border border-zinc-800 px-2.5 py-1 text-xs text-zinc-100"
-                            />
-                          </label>
+                        <div className="space-y-2">
+                          <div className="flex items-end gap-1.5">
+                            <label className="flex-1 flex flex-col gap-1 text-[11px] text-zinc-400">
+                              <span>Edit Selected Word Text</span>
+                              <input
+                                aria-label="Edit selected word text"
+                                type="text"
+                                value={editingWordText}
+                                onChange={(e) =>
+                                  setEditingWordText(e.target.value)
+                                }
+                                className="rounded-lg bg-zinc-950 border border-zinc-800 px-2.5 py-1 text-xs text-zinc-100"
+                              />
+                            </label>
+                            <button
+                              type="button"
+                              onClick={handleSaveWordText}
+                              className="rounded-lg border border-sky-500/40 bg-sky-500/20 hover:bg-sky-500/30 px-2.5 py-1 text-xs font-semibold text-sky-200 transition"
+                            >
+                              Save Word Text
+                            </button>
+                          </div>
+
                           <button
                             type="button"
-                            onClick={handleSaveWordText}
-                            className="rounded-lg border border-sky-500/40 bg-sky-500/20 hover:bg-sky-500/30 px-2.5 py-1 text-xs font-semibold text-sky-200 transition"
+                            aria-label="Toggle Word Emphasis"
+                            aria-pressed={
+                              editorState.projectedTranscriptWords.find(
+                                (w) => w.id === selectedWordRange.startWordId,
+                              )?.emphasis ?? false
+                            }
+                            onClick={handleToggleWordEmphasis}
+                            className={`w-full inline-flex items-center justify-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition ${
+                              editorState.projectedTranscriptWords.find(
+                                (w) => w.id === selectedWordRange.startWordId,
+                              )?.emphasis
+                                ? "border-amber-400/60 bg-amber-500/25 text-amber-200"
+                                : "border-zinc-800 bg-zinc-950 hover:bg-zinc-800 text-zinc-300"
+                            }`}
                           >
-                            Save Word Text
+                            <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                            <span>Toggle Word Emphasis</span>
                           </button>
                         </div>
                       )}
@@ -1358,6 +1482,317 @@ export function App() {
                   )}
                 </div>
               )}
+
+              {/* Animated Caption Presets, Curated Fonts & Word Grouping Inspector */}
+              <div className="border-t border-zinc-800 pt-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                    <Type className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Caption Presets &amp; Styling</span>
+                  </div>
+                  <span className="text-[10px] font-mono text-zinc-400">
+                    {editorState.timeline.captions.length} Captions
+                  </span>
+                </div>
+
+                {/* Built-in Caption Presets */}
+                <div className="grid grid-cols-1 gap-1.5">
+                  {Object.values(CAPTION_PRESETS).map((preset) => {
+                    const isActivePreset =
+                      activeCaptionStyle.presetId === preset.id;
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        aria-pressed={isActivePreset}
+                        onClick={() => handleApplyCaptionPreset(preset.id)}
+                        className={`rounded-lg border px-2.5 py-1.5 text-left text-xs font-medium transition flex items-center justify-between ${
+                          isActivePreset
+                            ? "border-amber-400 bg-amber-500/20 text-amber-100"
+                            : "border-zinc-800 bg-zinc-950 text-zinc-300 hover:bg-zinc-800"
+                        }`}
+                      >
+                        <span>{preset.name}</span>
+                        <span className="text-[10px] font-mono text-zinc-400">
+                          {preset.style.fontFamily}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Curated Reel Fonts & Typography Overrides */}
+                <div className="space-y-2 pt-1">
+                  <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                    <span>Caption Font Family</span>
+                    <select
+                      aria-label="Caption Font Family"
+                      value={activeCaptionStyle.fontFamily}
+                      onChange={(e) =>
+                        handleUpdateCaptionStyleOverrides({
+                          fontFamily: e.target.value as ReelFontFamily,
+                        })
+                      }
+                      className="rounded-lg bg-zinc-950 border border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-200"
+                    >
+                      {REEL_FONT_CATALOG.map((family) => (
+                        <option key={family} value={family}>
+                          {family}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                      <span>Font Size (px)</span>
+                      <input
+                        aria-label="Caption Font Size"
+                        type="number"
+                        min={24}
+                        max={140}
+                        step={2}
+                        value={activeCaptionStyle.fontSize}
+                        onChange={(e) =>
+                          handleUpdateCaptionStyleOverrides({
+                            fontSize: Math.max(
+                              16,
+                              Math.min(160, Number(e.target.value) || 58),
+                            ),
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs font-mono text-zinc-200"
+                      />
+                    </label>
+
+                    <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                      <span>Vertical Position (Y)</span>
+                      <input
+                        aria-label="Caption Vertical Position"
+                        type="number"
+                        min={0.1}
+                        max={0.9}
+                        step={0.02}
+                        value={activeCaptionStyle.positionY}
+                        onChange={(e) =>
+                          handleUpdateCaptionStyleOverrides({
+                            positionY: Math.max(
+                              0.05,
+                              Math.min(0.95, Number(e.target.value) || 0.72),
+                            ),
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs font-mono text-zinc-200"
+                      />
+                    </label>
+                  </div>
+
+                  {/* Uppercase & Shadow Toggles */}
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      type="button"
+                      aria-label="Uppercase Captions"
+                      aria-pressed={activeCaptionStyle.uppercase}
+                      onClick={() =>
+                        handleUpdateCaptionStyleOverrides({
+                          uppercase: !activeCaptionStyle.uppercase,
+                        })
+                      }
+                      className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+                        activeCaptionStyle.uppercase
+                          ? "border-amber-400 bg-amber-500/20 text-amber-200"
+                          : "border-zinc-800 bg-zinc-950 text-zinc-300 hover:bg-zinc-800"
+                      }`}
+                    >
+                      Uppercase
+                    </button>
+
+                    <button
+                      type="button"
+                      aria-label="Caption Shadow"
+                      aria-pressed={activeCaptionStyle.shadow}
+                      onClick={() =>
+                        handleUpdateCaptionStyleOverrides({
+                          shadow: !activeCaptionStyle.shadow,
+                        })
+                      }
+                      className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+                        activeCaptionStyle.shadow
+                          ? "border-amber-400 bg-amber-500/20 text-amber-200"
+                          : "border-zinc-800 bg-zinc-950 text-zinc-300 hover:bg-zinc-800"
+                      }`}
+                    >
+                      Shadow
+                    </button>
+                  </div>
+
+                  {/* Primary, Active Word, Emphasis & Stroke Colors */}
+                  <div className="grid grid-cols-3 gap-2">
+                    <label className="flex flex-col gap-1 text-[10px] text-zinc-400">
+                      <span>Primary</span>
+                      <input
+                        aria-label="Primary Text Color"
+                        type="text"
+                        value={activeCaptionStyle.primaryColor}
+                        onChange={(e) =>
+                          handleUpdateCaptionStyleOverrides({
+                            primaryColor: e.target.value,
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-[11px] font-mono text-zinc-200"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1 text-[10px] text-zinc-400">
+                      <span>Active Word</span>
+                      <input
+                        aria-label="Active Word Color"
+                        type="text"
+                        value={activeCaptionStyle.activeWordColor}
+                        onChange={(e) =>
+                          handleUpdateCaptionStyleOverrides({
+                            activeWordColor: e.target.value,
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-[11px] font-mono text-zinc-200"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1 text-[10px] text-zinc-400">
+                      <span>Emphasis</span>
+                      <input
+                        aria-label="Emphasis Word Color"
+                        type="text"
+                        value={activeCaptionStyle.emphasisColor}
+                        onChange={(e) =>
+                          handleUpdateCaptionStyleOverrides({
+                            emphasisColor: e.target.value,
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-[11px] font-mono text-zinc-200"
+                      />
+                    </label>
+                  </div>
+
+                  {/* Stroke Color/Width & Background Pill/Box Mode/Color */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                      <span>Stroke Color</span>
+                      <input
+                        aria-label="Stroke Color"
+                        type="text"
+                        value={activeCaptionStyle.strokeColor}
+                        onChange={(e) =>
+                          handleUpdateCaptionStyleOverrides({
+                            strokeColor: e.target.value,
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs font-mono text-zinc-200"
+                      />
+                    </label>
+
+                    <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                      <span>Stroke Width (px)</span>
+                      <input
+                        aria-label="Stroke Width"
+                        type="number"
+                        min={0}
+                        max={24}
+                        step={1}
+                        value={activeCaptionStyle.strokeWidth}
+                        onChange={(e) =>
+                          handleUpdateCaptionStyleOverrides({
+                            strokeWidth: Math.max(
+                              0,
+                              Number(e.target.value) || 0,
+                            ),
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs font-mono text-zinc-200"
+                      />
+                    </label>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                      <span>Background Mode</span>
+                      <select
+                        aria-label="Caption Background Mode"
+                        value={activeCaptionStyle.backgroundMode}
+                        onChange={(e) =>
+                          handleUpdateCaptionStyleOverrides({
+                            backgroundMode: e.target
+                              .value as CaptionBackgroundMode,
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs text-zinc-200"
+                      >
+                        <option value="pill">Pill</option>
+                        <option value="box">Box</option>
+                        <option value="none">None</option>
+                      </select>
+                    </label>
+
+                    <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                      <span>Background Color</span>
+                      <input
+                        aria-label="Caption Background Color"
+                        type="text"
+                        value={activeCaptionStyle.backgroundColor}
+                        onChange={(e) =>
+                          handleUpdateCaptionStyleOverrides({
+                            backgroundColor: e.target.value,
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs font-mono text-zinc-200"
+                      />
+                    </label>
+                  </div>
+
+                  {/* Word Grouping Controls: maxWordsPerCaption (1-6) & pauseBreakMs */}
+                  <div className="grid grid-cols-2 gap-2 pt-1 border-t border-zinc-800/80">
+                    <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                      <span>Max Words (1–6)</span>
+                      <input
+                        aria-label="Max Words Per Caption"
+                        type="number"
+                        min={1}
+                        max={6}
+                        step={1}
+                        value={activeCaptionGrouping.maxWordsPerCaption}
+                        onChange={(e) =>
+                          handleUpdateCaptionGrouping({
+                            maxWordsPerCaption: Math.max(
+                              1,
+                              Math.min(6, Number(e.target.value) || 4),
+                            ),
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs font-mono text-zinc-200"
+                      />
+                    </label>
+
+                    <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                      <span>Pause Break (ms)</span>
+                      <input
+                        aria-label="Pause Break Threshold (ms)"
+                        type="number"
+                        min={50}
+                        max={2000}
+                        step={50}
+                        value={activeCaptionGrouping.pauseBreakMs}
+                        onChange={(e) =>
+                          handleUpdateCaptionGrouping({
+                            pauseBreakMs: Math.max(
+                              0,
+                              Number(e.target.value) || 400,
+                            ),
+                          })
+                        }
+                        className="rounded bg-zinc-950 border border-zinc-800 px-2 py-1 text-xs font-mono text-zinc-200"
+                      />
+                    </label>
+                  </div>
+                </div>
+              </div>
             </aside>
           </div>
 
@@ -1444,6 +1879,66 @@ export function App() {
                 </div>
               </div>
             </div>
+
+            {/* Timeline Caption Track */}
+            {editorState.timeline.captions.length > 0 && (
+              <div
+                data-testid="timeline-caption-track"
+                className="w-full min-w-0 overflow-x-auto"
+              >
+                <div
+                  className="flex items-stretch gap-1.5"
+                  style={{ width: `${Math.round(timelineZoom * 100)}%` }}
+                >
+                  {editorState.timeline.captions.map((caption) => {
+                    const isCaptionActive =
+                      currentLayout?.activeCaption?.caption.id === caption.id;
+                    const hasEmphasis = caption.words.some((w) => w.emphasis);
+                    const captionDurationMs = Math.max(
+                      1,
+                      caption.timelineEndMs - caption.timelineStartMs,
+                    );
+                    const widthPercent = Math.max(
+                      8,
+                      Math.round(
+                        (captionDurationMs /
+                          Math.max(1, editorState.timeline.durationMs)) *
+                          100,
+                      ),
+                    );
+                    return (
+                      <button
+                        key={caption.id}
+                        type="button"
+                        data-testid={`timeline-caption-${caption.id}`}
+                        style={{ flexBasis: `${widthPercent}%` }}
+                        onClick={() =>
+                          seekToTimelineTime(caption.timelineStartMs)
+                        }
+                        className={`rounded-lg border px-2.5 py-1.5 text-left transition min-w-[140px] flex-grow truncate ${
+                          isCaptionActive
+                            ? "border-amber-400 bg-amber-500/20 text-amber-100"
+                            : "border-zinc-800 bg-zinc-950/80 hover:border-zinc-700 text-zinc-200"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 text-[11px] font-semibold truncate">
+                          <span className="truncate">{caption.text}</span>
+                          {hasEmphasis && (
+                            <span className="shrink-0 rounded bg-amber-500/25 px-1 py-0.2 text-[9px] font-mono text-amber-300">
+                              EMPH
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] font-mono text-zinc-400">
+                          {formatTimecodeMs(caption.timelineStartMs)} –{" "}
+                          {formatTimecodeMs(caption.timelineEndMs)}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Contiguous Clip Track (Ripple Delete guarantees zero gaps) */}
             <div className="w-full min-w-0 overflow-x-auto pb-2">

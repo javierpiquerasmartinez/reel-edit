@@ -81,7 +81,7 @@ export interface Caption {
 }
 
 export const CaptionGroupingConfigSchema = z.object({
-  maxWordsPerCaption: z.number().int().min(1).max(12),
+  maxWordsPerCaption: z.number().int().min(1).max(6),
   pauseBreakMs: z.number().finite().min(0),
 });
 
@@ -91,6 +91,197 @@ export const DEFAULT_CAPTION_GROUPING: CaptionGroupingConfig = Object.freeze({
   maxWordsPerCaption: 4,
   pauseBreakMs: 400,
 });
+
+export const REEL_FONT_CATALOG = [
+  "Montserrat",
+  "Anton",
+  "Inter",
+  "Bebas Neue",
+  "Poppins",
+  "Bangers",
+] as const;
+
+export const ReelFontFamilySchema = z.enum(REEL_FONT_CATALOG);
+export type ReelFontFamily = z.infer<typeof ReelFontFamilySchema>;
+
+export const CaptionPresetIdSchema = z.enum([
+  "flat",
+  "hormozi-highlight",
+  "word-pop",
+  "neon-box",
+  "clean-minimal",
+]);
+export type CaptionPresetId = z.infer<typeof CaptionPresetIdSchema>;
+
+export const CaptionAnimationModeSchema = z.enum([
+  "flat",
+  "hormozi-highlight",
+  "word-pop",
+]);
+export type CaptionAnimationMode = z.infer<typeof CaptionAnimationModeSchema>;
+
+export const CaptionBackgroundModeSchema = z.enum(["none", "pill", "box"]);
+export type CaptionBackgroundMode = z.infer<typeof CaptionBackgroundModeSchema>;
+
+export interface CaptionStyle {
+  readonly presetId: CaptionPresetId;
+  readonly animationMode: CaptionAnimationMode;
+  readonly fontFamily: ReelFontFamily;
+  readonly fontSize: number;
+  readonly uppercase: boolean;
+  readonly primaryColor: string;
+  readonly activeWordColor: string;
+  readonly emphasisColor: string;
+  readonly strokeColor: string;
+  readonly strokeWidth: number;
+  readonly shadow: boolean;
+  readonly backgroundMode: CaptionBackgroundMode;
+  readonly backgroundColor: string;
+  readonly positionY: number;
+}
+
+export interface CaptionPresetDescriptor {
+  readonly id: CaptionPresetId;
+  readonly name: string;
+  readonly description: string;
+  readonly style: CaptionStyle;
+}
+
+export const CAPTION_PRESETS: Readonly<Record<CaptionPresetId, CaptionPresetDescriptor>> =
+  Object.freeze({
+    flat: {
+      id: "flat",
+      name: "Flat Static",
+      description: "Static readable block with emphasis color support",
+      style: Object.freeze({
+        presetId: "flat",
+        animationMode: "flat",
+        fontFamily: "Inter",
+        fontSize: 58,
+        uppercase: false,
+        primaryColor: "#ffffff",
+        activeWordColor: "#ffffff",
+        emphasisColor: "#38bdf8",
+        strokeColor: "#09090b",
+        strokeWidth: 4,
+        shadow: true,
+        backgroundMode: "pill",
+        backgroundColor: "rgba(9, 9, 11, 0.82)",
+        positionY: 0.72,
+      }),
+    },
+    "hormozi-highlight": {
+      id: "hormozi-highlight",
+      name: "Hormozi Active-Word Highlight",
+      description: "Bold uppercase with active spoken word highlight and pill",
+      style: Object.freeze({
+        presetId: "hormozi-highlight",
+        animationMode: "hormozi-highlight",
+        fontFamily: "Montserrat",
+        fontSize: 68,
+        uppercase: true,
+        primaryColor: "#ffffff",
+        activeWordColor: "#facc15",
+        emphasisColor: "#22c55e",
+        strokeColor: "#000000",
+        strokeWidth: 8,
+        shadow: true,
+        backgroundMode: "pill",
+        backgroundColor: "rgba(9, 9, 11, 0.78)",
+        positionY: 0.72,
+      }),
+    },
+    "word-pop": {
+      id: "word-pop",
+      name: "Word-by-Word Pop",
+      description: "Spring-scaled entry pop animation as each word is spoken",
+      style: Object.freeze({
+        presetId: "word-pop",
+        animationMode: "word-pop",
+        fontFamily: "Anton",
+        fontSize: 72,
+        uppercase: true,
+        primaryColor: "#ffffff",
+        activeWordColor: "#38bdf8",
+        emphasisColor: "#f43f5e",
+        strokeColor: "#09090b",
+        strokeWidth: 6,
+        shadow: true,
+        backgroundMode: "none",
+        backgroundColor: "rgba(9, 9, 11, 0.0)",
+        positionY: 0.7,
+      }),
+    },
+    "neon-box": {
+      id: "neon-box",
+      name: "Neon Box",
+      description: "High-contrast active word box with neon accent styling",
+      style: Object.freeze({
+        presetId: "neon-box",
+        animationMode: "hormozi-highlight",
+        fontFamily: "Bebas Neue",
+        fontSize: 70,
+        uppercase: true,
+        primaryColor: "#f8fafc",
+        activeWordColor: "#09090b",
+        emphasisColor: "#e879f9",
+        strokeColor: "#09090b",
+        strokeWidth: 4,
+        shadow: true,
+        backgroundMode: "box",
+        backgroundColor: "#a855f7",
+        positionY: 0.74,
+      }),
+    },
+    "clean-minimal": {
+      id: "clean-minimal",
+      name: "Clean Minimal",
+      description: "Subtle modern lower-third pill for clean creator Reels",
+      style: Object.freeze({
+        presetId: "clean-minimal",
+        animationMode: "flat",
+        fontFamily: "Poppins",
+        fontSize: 52,
+        uppercase: false,
+        primaryColor: "#f4f4f5",
+        activeWordColor: "#ffffff",
+        emphasisColor: "#fde047",
+        strokeColor: "#18181b",
+        strokeWidth: 2,
+        shadow: false,
+        backgroundMode: "pill",
+        backgroundColor: "rgba(24, 24, 27, 0.65)",
+        positionY: 0.78,
+      }),
+    },
+  });
+
+export const DEFAULT_CAPTION_STYLE: CaptionStyle = CAPTION_PRESETS.flat.style;
+
+export const CaptionStyleOverridesSchema = z.object({
+  animationMode: CaptionAnimationModeSchema.optional(),
+  fontFamily: ReelFontFamilySchema.optional(),
+  fontSize: z.number().finite().min(16).max(160).optional(),
+  uppercase: z.boolean().optional(),
+  primaryColor: z.string().min(1).optional(),
+  activeWordColor: z.string().min(1).optional(),
+  emphasisColor: z.string().min(1).optional(),
+  strokeColor: z.string().min(1).optional(),
+  strokeWidth: z.number().finite().min(0).max(32).optional(),
+  shadow: z.boolean().optional(),
+  backgroundMode: CaptionBackgroundModeSchema.optional(),
+  backgroundColor: z.string().min(1).optional(),
+  positionY: z.number().finite().min(0.05).max(0.95).optional(),
+});
+
+export type CaptionStyleOverrides = z.infer<typeof CaptionStyleOverridesSchema>;
+
+export const CaptionGroupingPatchSchema = z.object({
+  maxWordsPerCaption: z.number().int().min(1).max(6).optional(),
+  pauseBreakMs: z.number().finite().min(0).optional(),
+});
+
+export type CaptionGroupingPatch = z.infer<typeof CaptionGroupingPatchSchema>;
 
 export interface ProjectedTranscriptWord {
   readonly id: string;
@@ -240,6 +431,8 @@ export interface EditorState {
   readonly audioEnvelope?: AudioEnvelope | null;
   readonly transcript: Transcript;
   readonly projectedTranscriptWords: readonly ProjectedTranscriptWord[];
+  readonly captionStyle: CaptionStyle;
+  readonly captionGrouping: CaptionGroupingConfig;
   readonly timeline: Timeline;
   readonly canUndo: boolean;
   readonly canRedo: boolean;
@@ -304,6 +497,13 @@ export const UpdateWordsCommandSchema = z.object({
   updates: z.array(WordUpdateSchema).min(1),
 });
 
+export const UpdateCaptionStyleCommandSchema = z.object({
+  type: z.literal("updateCaptionStyle"),
+  presetId: CaptionPresetIdSchema.optional(),
+  styleOverrides: CaptionStyleOverridesSchema.optional(),
+  grouping: CaptionGroupingPatchSchema.optional(),
+});
+
 export const EditCommandSchema = z.discriminatedUnion("type", [
   SplitClipCommandSchema,
   DeleteClipsCommandSchema,
@@ -314,6 +514,7 @@ export const EditCommandSchema = z.discriminatedUnion("type", [
   RemoveSilencesCommandSchema,
   DeleteWordRangeCommandSchema,
   UpdateWordsCommandSchema,
+  UpdateCaptionStyleCommandSchema,
 ]);
 
 export type SplitClipCommand = z.infer<typeof SplitClipCommandSchema>;
@@ -328,6 +529,9 @@ export type RemoveSilencesCommand = z.infer<typeof RemoveSilencesCommandSchema>;
 export type DeleteWordRangeCommand = z.infer<typeof DeleteWordRangeCommandSchema>;
 export type WordUpdate = z.infer<typeof WordUpdateSchema>;
 export type UpdateWordsCommand = z.infer<typeof UpdateWordsCommandSchema>;
+export type UpdateCaptionStyleCommand = z.infer<
+  typeof UpdateCaptionStyleCommandSchema
+>;
 export type EditCommand = z.infer<typeof EditCommandSchema>;
 
 export interface DispatchResult {
@@ -345,6 +549,8 @@ interface SourceClipRange {
 interface HistorySnapshot {
   readonly clips: readonly SourceClipRange[];
   readonly transcriptWords: readonly WordTiming[];
+  readonly captionStyle: CaptionStyle;
+  readonly captionGrouping: CaptionGroupingConfig;
   readonly nextClipCounter: number;
 }
 
@@ -638,6 +844,7 @@ export class EditorSession {
   private readonly sourceMedia: SourceMedia;
   private audioEnvelope: AudioEnvelope | null;
   private transcriptWords: readonly WordTiming[];
+  private captionStyle: CaptionStyle = { ...DEFAULT_CAPTION_STYLE };
   private captionGrouping: CaptionGroupingConfig = {
     ...DEFAULT_CAPTION_GROUPING,
   };
@@ -722,6 +929,8 @@ export class EditorSession {
         transform: { ...c.transform },
       })),
       transcriptWords: cloneWordTimings(this.transcriptWords),
+      captionStyle: { ...this.captionStyle },
+      captionGrouping: { ...this.captionGrouping },
       nextClipCounter: this.nextClipCounter,
     };
   }
@@ -731,6 +940,8 @@ export class EditorSession {
     updates: {
       readonly clips?: readonly SourceClipRange[];
       readonly transcriptWords?: readonly WordTiming[];
+      readonly captionStyle?: CaptionStyle;
+      readonly captionGrouping?: CaptionGroupingConfig;
     },
   ): DispatchResult {
     this.undoStack.push(snapshotBefore);
@@ -740,6 +951,12 @@ export class EditorSession {
     }
     if (updates.transcriptWords) {
       this.transcriptWords = updates.transcriptWords;
+    }
+    if (updates.captionStyle) {
+      this.captionStyle = updates.captionStyle;
+    }
+    if (updates.captionGrouping) {
+      this.captionGrouping = updates.captionGrouping;
     }
     this.notify();
     return { applied: true };
@@ -764,6 +981,8 @@ export class EditorSession {
       audioEnvelope: this.audioEnvelope,
       transcript: { words },
       projectedTranscriptWords: projectTranscriptWords(timeline.clips, words),
+      captionStyle: { ...this.captionStyle },
+      captionGrouping: { ...this.captionGrouping },
       timeline,
       canUndo: this.undoStack.length > 0,
       canRedo: this.redoStack.length > 0,
@@ -1099,6 +1318,71 @@ export class EditorSession {
       return this.commitState(snapshotBefore, { transcriptWords: nextWords });
     }
 
+    if (parsed.type === "updateCaptionStyle") {
+      const baseStyle: CaptionStyle = parsed.presetId
+        ? { ...CAPTION_PRESETS[parsed.presetId].style }
+        : { ...this.captionStyle };
+
+      const overrides = parsed.styleOverrides;
+      const nextStyle: CaptionStyle = {
+        presetId: baseStyle.presetId,
+        animationMode: overrides?.animationMode ?? baseStyle.animationMode,
+        fontFamily: overrides?.fontFamily ?? baseStyle.fontFamily,
+        fontSize: overrides?.fontSize ?? baseStyle.fontSize,
+        uppercase: overrides?.uppercase ?? baseStyle.uppercase,
+        primaryColor: overrides?.primaryColor ?? baseStyle.primaryColor,
+        activeWordColor: overrides?.activeWordColor ?? baseStyle.activeWordColor,
+        emphasisColor: overrides?.emphasisColor ?? baseStyle.emphasisColor,
+        strokeColor: overrides?.strokeColor ?? baseStyle.strokeColor,
+        strokeWidth: overrides?.strokeWidth ?? baseStyle.strokeWidth,
+        shadow: overrides?.shadow ?? baseStyle.shadow,
+        backgroundMode: overrides?.backgroundMode ?? baseStyle.backgroundMode,
+        backgroundColor: overrides?.backgroundColor ?? baseStyle.backgroundColor,
+        positionY: overrides?.positionY ?? baseStyle.positionY,
+      };
+
+      const nextGrouping: CaptionGroupingConfig = {
+        maxWordsPerCaption:
+          parsed.grouping?.maxWordsPerCaption ??
+          this.captionGrouping.maxWordsPerCaption,
+        pauseBreakMs:
+          parsed.grouping?.pauseBreakMs ?? this.captionGrouping.pauseBreakMs,
+      };
+
+      const styleChanged =
+        nextStyle.presetId !== this.captionStyle.presetId ||
+        nextStyle.animationMode !== this.captionStyle.animationMode ||
+        nextStyle.fontFamily !== this.captionStyle.fontFamily ||
+        nextStyle.fontSize !== this.captionStyle.fontSize ||
+        nextStyle.uppercase !== this.captionStyle.uppercase ||
+        nextStyle.primaryColor !== this.captionStyle.primaryColor ||
+        nextStyle.activeWordColor !== this.captionStyle.activeWordColor ||
+        nextStyle.emphasisColor !== this.captionStyle.emphasisColor ||
+        nextStyle.strokeColor !== this.captionStyle.strokeColor ||
+        nextStyle.strokeWidth !== this.captionStyle.strokeWidth ||
+        nextStyle.shadow !== this.captionStyle.shadow ||
+        nextStyle.backgroundMode !== this.captionStyle.backgroundMode ||
+        nextStyle.backgroundColor !== this.captionStyle.backgroundColor ||
+        nextStyle.positionY !== this.captionStyle.positionY;
+
+      const groupingChanged =
+        nextGrouping.maxWordsPerCaption !==
+          this.captionGrouping.maxWordsPerCaption ||
+        nextGrouping.pauseBreakMs !== this.captionGrouping.pauseBreakMs;
+
+      if (!styleChanged && !groupingChanged) {
+        return {
+          applied: false,
+          reason: "Caption style and grouping values unchanged",
+        };
+      }
+
+      return this.commitState(snapshotBefore, {
+        captionStyle: nextStyle,
+        captionGrouping: nextGrouping,
+      });
+    }
+
     const clipIndex = this.clips.findIndex((c) => c.id === parsed.clipId);
     if (clipIndex === -1) {
       return {
@@ -1149,6 +1433,8 @@ export class EditorSession {
     this.redoStack.push(this.createSnapshot());
     this.clips = previous.clips;
     this.transcriptWords = previous.transcriptWords;
+    this.captionStyle = { ...previous.captionStyle };
+    this.captionGrouping = { ...previous.captionGrouping };
     this.nextClipCounter = previous.nextClipCounter;
     this.notify();
     return true;
@@ -1162,6 +1448,8 @@ export class EditorSession {
     this.undoStack.push(this.createSnapshot());
     this.clips = next.clips;
     this.transcriptWords = next.transcriptWords;
+    this.captionStyle = { ...next.captionStyle };
+    this.captionGrouping = { ...next.captionGrouping };
     this.nextClipCounter = next.nextClipCounter;
     this.notify();
     return true;
