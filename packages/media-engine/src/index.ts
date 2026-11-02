@@ -3,6 +3,8 @@ import {
   computeSilenceRegionsFromEnvelope,
   getAudioEnvelopeBucketRange,
   type AudioEnvelope,
+  type Caption,
+  type CaptionWord,
   type Clip,
   type ClipTransform,
   type EditorState,
@@ -10,6 +12,8 @@ import {
   type SilenceRegion,
   type Timeline,
 } from "@reel-edit/editor-core";
+
+export * from "./transcription.js";
 
 export interface PcmAudioInput {
   readonly samples: Float32Array | readonly number[];
@@ -356,6 +360,16 @@ export interface FrameLayoutOptions {
   readonly showSafeArea?: boolean;
 }
 
+export interface ActiveCaptionDescriptor {
+  readonly caption: Caption;
+  readonly text: string;
+  readonly activeWordIndex: number;
+  readonly activeWord: CaptionWord | null;
+  readonly words: readonly CaptionWord[];
+  readonly centerX: number;
+  readonly baselineY: number;
+}
+
 export interface FrameLayoutDescriptor {
   readonly canvasWidth: number;
   readonly canvasHeight: number;
@@ -366,6 +380,7 @@ export interface FrameLayoutDescriptor {
   readonly drawRect: Rect;
   readonly backdropRect: Rect | null;
   readonly safeArea: SafeAreaOverlay | null;
+  readonly activeCaption: ActiveCaptionDescriptor | null;
 }
 
 function computeTransformedDrawRect(
@@ -454,6 +469,63 @@ function computeSafeAreaOverlay(
   return { safeRect, zones };
 }
 
+function resolveActiveCaption(
+  captions: readonly Caption[] | undefined,
+  clipId: string,
+  timelineTimeMs: number,
+  canvasWidth: number,
+  canvasHeight: number,
+): ActiveCaptionDescriptor | null {
+  if (!captions || captions.length === 0) {
+    return null;
+  }
+
+  const caption =
+    captions.find(
+      (c) =>
+        c.clipId === clipId &&
+        timelineTimeMs >= c.timelineStartMs &&
+        timelineTimeMs < c.timelineEndMs,
+    ) ??
+    captions.find(
+      (c) =>
+        c.clipId === clipId &&
+        timelineTimeMs >= c.timelineStartMs &&
+        timelineTimeMs <= c.timelineEndMs,
+    ) ??
+    null;
+
+  if (!caption) {
+    return null;
+  }
+
+  let activeWordIndex = caption.words.findIndex(
+    (w) =>
+      timelineTimeMs >= w.timelineStartMs && timelineTimeMs <= w.timelineEndMs,
+  );
+  if (activeWordIndex === -1) {
+    for (let i = caption.words.length - 1; i >= 0; i--) {
+      if (timelineTimeMs >= caption.words[i]!.timelineStartMs) {
+        activeWordIndex = i;
+        break;
+      }
+    }
+  }
+  if (activeWordIndex === -1) {
+    activeWordIndex = 0;
+  }
+
+  return {
+    caption,
+    text: caption.text,
+    activeWordIndex,
+    activeWord: caption.words[activeWordIndex] ?? null,
+    words: caption.words,
+    centerX: Math.round(canvasWidth / 2),
+    baselineY: Math.round(canvasHeight * 0.72),
+  };
+}
+
 export function resolveFrameLayout(
   state: EditorState,
   timelineTimeMs: number,
@@ -507,6 +579,14 @@ export function resolveFrameLayout(
         )
       : null;
 
+  const activeCaption = resolveActiveCaption(
+    state.timeline.captions,
+    activeClip.id,
+    clampedTimeMs,
+    canvasWidth,
+    canvasHeight,
+  );
+
   return {
     canvasWidth,
     canvasHeight,
@@ -519,6 +599,7 @@ export function resolveFrameLayout(
     safeArea: showSafeArea
       ? computeSafeAreaOverlay(canvasWidth, canvasHeight)
       : null,
+    activeCaption,
   };
 }
 
@@ -594,7 +675,14 @@ export function renderFrame(
   videoSource: CanvasImageSource | null,
   layout: FrameLayoutDescriptor,
 ): void {
-  const { canvasWidth, canvasHeight, drawRect, backdropRect, safeArea } = layout;
+  const {
+    canvasWidth,
+    canvasHeight,
+    drawRect,
+    backdropRect,
+    safeArea,
+    activeCaption,
+  } = layout;
 
   ctx.save();
   ctx.fillStyle = "#09090b";
@@ -625,6 +713,39 @@ export function renderFrame(
       drawRect.width,
       drawRect.height,
     );
+  }
+
+  if (activeCaption) {
+    const scaleX = canvasWidth / 1080;
+    const scaleY = canvasHeight / 1920;
+    const fontSize = Math.max(24, Math.round(58 * scaleY));
+    ctx.font = `800 ${fontSize}px Inter, system-ui, sans-serif`;
+
+    const measuredWidth =
+      typeof ctx.measureText === "function"
+        ? ctx.measureText(activeCaption.text).width
+        : activeCaption.text.length * fontSize * 0.52;
+    const pillPadX = Math.round(32 * scaleX);
+    const pillPadY = Math.round(22 * scaleY);
+    const pillWidth = Math.min(
+      canvasWidth - Math.round(96 * scaleX),
+      Math.round(measuredWidth + pillPadX * 2),
+    );
+    const pillHeight = Math.round(fontSize + pillPadY * 2);
+    const pillX = Math.round(activeCaption.centerX - pillWidth / 2);
+    const pillY = Math.round(
+      activeCaption.baselineY - fontSize - pillPadY * 0.65,
+    );
+
+    ctx.fillStyle = "rgba(9, 9, 11, 0.78)";
+    ctx.fillRect(pillX, pillY, pillWidth, pillHeight);
+
+    ctx.fillStyle = "#ffffff";
+    const textX = Math.max(
+      pillX + pillPadX,
+      Math.round(activeCaption.centerX - measuredWidth / 2),
+    );
+    ctx.fillText(activeCaption.text, textX, activeCaption.baselineY);
   }
 
   if (safeArea) {

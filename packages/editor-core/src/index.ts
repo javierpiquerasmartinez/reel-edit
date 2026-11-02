@@ -35,8 +35,80 @@ export interface Clip {
   readonly transform: ClipTransform;
 }
 
+export interface WordTiming {
+  readonly id: string;
+  readonly text: string;
+  readonly sourceStartMs: number;
+  readonly sourceEndMs: number;
+  readonly confidence?: number;
+  readonly emphasis: boolean;
+}
+
+export interface WordTimingInput {
+  readonly id?: string;
+  readonly text: string;
+  readonly sourceStartMs: number;
+  readonly sourceEndMs: number;
+  readonly confidence?: number;
+  readonly emphasis?: boolean;
+}
+
+export interface Transcript {
+  readonly words: readonly WordTiming[];
+}
+
+export interface CaptionWord {
+  readonly wordId: string;
+  readonly clipId: string;
+  readonly text: string;
+  readonly sourceStartMs: number;
+  readonly sourceEndMs: number;
+  readonly timelineStartMs: number;
+  readonly timelineEndMs: number;
+  readonly emphasis: boolean;
+  readonly confidence?: number;
+}
+
+export interface Caption {
+  readonly id: string;
+  readonly clipId: string;
+  readonly text: string;
+  readonly sourceStartMs: number;
+  readonly sourceEndMs: number;
+  readonly timelineStartMs: number;
+  readonly timelineEndMs: number;
+  readonly words: readonly CaptionWord[];
+}
+
+export const CaptionGroupingConfigSchema = z.object({
+  maxWordsPerCaption: z.number().int().min(1).max(12),
+  pauseBreakMs: z.number().finite().min(0),
+});
+
+export type CaptionGroupingConfig = z.infer<typeof CaptionGroupingConfigSchema>;
+
+export const DEFAULT_CAPTION_GROUPING: CaptionGroupingConfig = Object.freeze({
+  maxWordsPerCaption: 4,
+  pauseBreakMs: 400,
+});
+
+export interface ProjectedTranscriptWord {
+  readonly id: string;
+  readonly text: string;
+  readonly sourceStartMs: number;
+  readonly sourceEndMs: number;
+  readonly emphasis: boolean;
+  readonly confidence?: number;
+  readonly isActive: boolean;
+  readonly clipId: string | null;
+  readonly timelineStartMs: number | null;
+  readonly timelineEndMs: number | null;
+  readonly occurrences: readonly CaptionWord[];
+}
+
 export interface Timeline {
   readonly clips: readonly Clip[];
+  readonly captions: readonly Caption[];
   readonly durationMs: number;
 }
 
@@ -166,6 +238,8 @@ export function computeSilenceRegionsFromEnvelope(
 export interface EditorState {
   readonly sourceMedia: SourceMedia;
   readonly audioEnvelope?: AudioEnvelope | null;
+  readonly transcript: Transcript;
+  readonly projectedTranscriptWords: readonly ProjectedTranscriptWord[];
   readonly timeline: Timeline;
   readonly canUndo: boolean;
   readonly canRedo: boolean;
@@ -213,6 +287,23 @@ export const RemoveSilencesCommandSchema = SilenceDetectionConfigSchema.extend({
   type: z.literal("removeSilences"),
 });
 
+export const DeleteWordRangeCommandSchema = z.object({
+  type: z.literal("deleteWordRange"),
+  startWordId: z.string().min(1),
+  endWordId: z.string().min(1),
+});
+
+export const WordUpdateSchema = z.object({
+  wordId: z.string().min(1),
+  text: z.string().optional(),
+  emphasis: z.boolean().optional(),
+});
+
+export const UpdateWordsCommandSchema = z.object({
+  type: z.literal("updateWords"),
+  updates: z.array(WordUpdateSchema).min(1),
+});
+
 export const EditCommandSchema = z.discriminatedUnion("type", [
   SplitClipCommandSchema,
   DeleteClipsCommandSchema,
@@ -221,6 +312,8 @@ export const EditCommandSchema = z.discriminatedUnion("type", [
   ReorderClipCommandSchema,
   DuplicateClipAsHookCommandSchema,
   RemoveSilencesCommandSchema,
+  DeleteWordRangeCommandSchema,
+  UpdateWordsCommandSchema,
 ]);
 
 export type SplitClipCommand = z.infer<typeof SplitClipCommandSchema>;
@@ -232,6 +325,9 @@ export type DuplicateClipAsHookCommand = z.infer<
   typeof DuplicateClipAsHookCommandSchema
 >;
 export type RemoveSilencesCommand = z.infer<typeof RemoveSilencesCommandSchema>;
+export type DeleteWordRangeCommand = z.infer<typeof DeleteWordRangeCommandSchema>;
+export type WordUpdate = z.infer<typeof WordUpdateSchema>;
+export type UpdateWordsCommand = z.infer<typeof UpdateWordsCommandSchema>;
 export type EditCommand = z.infer<typeof EditCommandSchema>;
 
 export interface DispatchResult {
@@ -248,6 +344,7 @@ interface SourceClipRange {
 
 interface HistorySnapshot {
   readonly clips: readonly SourceClipRange[];
+  readonly transcriptWords: readonly WordTiming[];
   readonly nextClipCounter: number;
 }
 
@@ -262,7 +359,252 @@ function clampSourceRange(
   };
 }
 
-function projectTimeline(sourceClips: readonly SourceClipRange[]): Timeline {
+export function normalizeWordTimings(
+  input: readonly WordTimingInput[] | Transcript,
+  sourceDurationMs?: number,
+): WordTiming[] {
+  const rawWords = "words" in input ? input.words : input;
+  const maxDuration =
+    typeof sourceDurationMs === "number" && sourceDurationMs > 0
+      ? sourceDurationMs
+      : Number.POSITIVE_INFINITY;
+
+  const normalized: WordTiming[] = [];
+  for (let i = 0; i < rawWords.length; i++) {
+    const item = rawWords[i]!;
+    const trimmedText = item.text.trim();
+    if (!trimmedText) {
+      continue;
+    }
+    const startMs = Math.max(
+      0,
+      Math.min(maxDuration, Math.round(item.sourceStartMs)),
+    );
+    const endMs = Math.max(
+      startMs + 1,
+      Math.min(maxDuration, Math.round(item.sourceEndMs)),
+    );
+    const word: WordTiming = {
+      id: item.id && item.id.trim().length > 0 ? item.id.trim() : `word-${i + 1}`,
+      text: trimmedText,
+      sourceStartMs: startMs,
+      sourceEndMs: endMs,
+      emphasis: Boolean(item.emphasis),
+      ...(typeof item.confidence === "number"
+        ? { confidence: item.confidence }
+        : {}),
+    };
+    normalized.push(word);
+  }
+
+  return normalized.sort((a, b) => a.sourceStartMs - b.sourceStartMs);
+}
+
+function cloneWordTimings(words: readonly WordTiming[]): WordTiming[] {
+  return words.map((w) => ({ ...w }));
+}
+
+const TERMINAL_PUNCTUATION_REGEX = /[.!?]["')\]]*$/;
+
+function projectWordOntoClip(
+  word: WordTiming,
+  clip: Clip,
+): CaptionWord | null {
+  if (
+    word.sourceEndMs <= clip.sourceStartMs ||
+    word.sourceStartMs >= clip.sourceEndMs
+  ) {
+    return null;
+  }
+
+  const clampedSourceStartMs = Math.max(
+    clip.sourceStartMs,
+    word.sourceStartMs,
+  );
+  const clampedSourceEndMs = Math.min(clip.sourceEndMs, word.sourceEndMs);
+  if (clampedSourceEndMs <= clampedSourceStartMs) {
+    return null;
+  }
+
+  return {
+    wordId: word.id,
+    clipId: clip.id,
+    text: word.text,
+    sourceStartMs: clampedSourceStartMs,
+    sourceEndMs: clampedSourceEndMs,
+    timelineStartMs:
+      clip.timelineStartMs + (clampedSourceStartMs - clip.sourceStartMs),
+    timelineEndMs:
+      clip.timelineStartMs + (clampedSourceEndMs - clip.sourceStartMs),
+    emphasis: word.emphasis,
+    ...(typeof word.confidence === "number"
+      ? { confidence: word.confidence }
+      : {}),
+  };
+}
+
+function carveSourceIntervalsFromClips(
+  clips: readonly SourceClipRange[],
+  intervalsToCut: ReadonlyArray<{
+    readonly startMs: number;
+    readonly endMs: number;
+  }>,
+  allocateClipId: () => string,
+): { readonly changed: boolean; readonly nextClips: SourceClipRange[] } {
+  let changed = false;
+  const nextClips: SourceClipRange[] = [];
+
+  for (const clip of clips) {
+    let clipRanges: Array<{ startMs: number; endMs: number }> = [
+      { startMs: clip.sourceStartMs, endMs: clip.sourceEndMs },
+    ];
+
+    for (const cut of intervalsToCut) {
+      clipRanges = clipRanges.flatMap((range) => {
+        if (cut.endMs <= range.startMs || cut.startMs >= range.endMs) {
+          return [range];
+        }
+        const kept: Array<{ startMs: number; endMs: number }> = [];
+        if (cut.startMs > range.startMs) {
+          kept.push({ startMs: range.startMs, endMs: cut.startMs });
+        }
+        if (cut.endMs < range.endMs) {
+          kept.push({ startMs: cut.endMs, endMs: range.endMs });
+        }
+        return kept;
+      });
+    }
+
+    if (
+      clipRanges.length !== 1 ||
+      clipRanges[0]!.startMs !== clip.sourceStartMs ||
+      clipRanges[0]!.endMs !== clip.sourceEndMs
+    ) {
+      changed = true;
+    }
+
+    clipRanges.forEach((range, rangeIndex) => {
+      nextClips.push({
+        id: rangeIndex === 0 ? clip.id : allocateClipId(),
+        sourceStartMs: range.startMs,
+        sourceEndMs: range.endMs,
+        transform: { ...clip.transform },
+      });
+    });
+  }
+
+  return { changed, nextClips };
+}
+
+export function projectCaptions(
+  clips: readonly Clip[],
+  transcriptWords: readonly WordTiming[],
+  grouping: CaptionGroupingConfig = DEFAULT_CAPTION_GROUPING,
+): Caption[] {
+  if (clips.length === 0 || transcriptWords.length === 0) {
+    return [];
+  }
+
+  const maxWords = Math.max(1, Math.floor(grouping.maxWordsPerCaption));
+  const pauseBreakMs = Math.max(0, grouping.pauseBreakMs);
+  const captions: Caption[] = [];
+  let captionCounter = 1;
+
+  for (const clip of clips) {
+    const overlappingWords: CaptionWord[] = [];
+    for (const word of transcriptWords) {
+      const projected = projectWordOntoClip(word, clip);
+      if (projected) {
+        overlappingWords.push(projected);
+      }
+    }
+
+    if (overlappingWords.length === 0) {
+      continue;
+    }
+
+    let currentGroup: CaptionWord[] = [];
+    const flushGroup = () => {
+      if (currentGroup.length === 0) {
+        return;
+      }
+      const first = currentGroup[0]!;
+      const last = currentGroup[currentGroup.length - 1]!;
+      captions.push({
+        id: `caption-${captionCounter++}`,
+        clipId: clip.id,
+        text: currentGroup.map((w) => w.text).join(" "),
+        sourceStartMs: first.sourceStartMs,
+        sourceEndMs: last.sourceEndMs,
+        timelineStartMs: first.timelineStartMs,
+        timelineEndMs: last.timelineEndMs,
+        words: currentGroup,
+      });
+      currentGroup = [];
+    };
+
+    for (const word of overlappingWords) {
+      if (currentGroup.length > 0) {
+        const prev = currentGroup[currentGroup.length - 1]!;
+        const gapMs = word.sourceStartMs - prev.sourceEndMs;
+        const reachedMaxWords = currentGroup.length >= maxWords;
+        const exceededPause = gapMs > pauseBreakMs;
+        const prevEndedSentence = TERMINAL_PUNCTUATION_REGEX.test(prev.text);
+
+        if (reachedMaxWords || exceededPause || prevEndedSentence) {
+          flushGroup();
+        }
+      }
+      currentGroup.push(word);
+    }
+
+    flushGroup();
+  }
+
+  return captions;
+}
+
+export function projectTranscriptWords(
+  clips: readonly Clip[],
+  transcriptWords: readonly WordTiming[],
+): ProjectedTranscriptWord[] {
+  return transcriptWords.map((word) => {
+    const occurrences: CaptionWord[] = [];
+    for (const clip of clips) {
+      const projected = projectWordOntoClip(word, clip);
+      if (projected) {
+        occurrences.push(projected);
+      }
+    }
+
+    // Prefer the canonical (last) occurrence when a segment was duplicated as an opening Hook at 0ms,
+    // while retaining all occurrences so callers can inspect every timeline placement.
+    const primary =
+      occurrences.length > 0 ? occurrences[occurrences.length - 1]! : null;
+
+    return {
+      id: word.id,
+      text: word.text,
+      sourceStartMs: word.sourceStartMs,
+      sourceEndMs: word.sourceEndMs,
+      emphasis: word.emphasis,
+      ...(typeof word.confidence === "number"
+        ? { confidence: word.confidence }
+        : {}),
+      isActive: primary !== null,
+      clipId: primary ? primary.clipId : null,
+      timelineStartMs: primary ? primary.timelineStartMs : null,
+      timelineEndMs: primary ? primary.timelineEndMs : null,
+      occurrences,
+    };
+  });
+}
+
+function projectTimeline(
+  sourceClips: readonly SourceClipRange[],
+  transcriptWords: readonly WordTiming[] = [],
+  grouping: CaptionGroupingConfig = DEFAULT_CAPTION_GROUPING,
+): Timeline {
   let cursorMs = 0;
   const clips: Clip[] = sourceClips.map((sourceClip) => {
     const durationMs = sourceClip.sourceEndMs - sourceClip.sourceStartMs;
@@ -279,19 +621,26 @@ function projectTimeline(sourceClips: readonly SourceClipRange[]): Timeline {
       transform: { ...sourceClip.transform },
     };
   });
+  const captions = projectCaptions(clips, transcriptWords, grouping);
   return {
     clips,
+    captions,
     durationMs: cursorMs,
   };
 }
 
 export interface EditorSessionOptions {
   readonly audioEnvelope?: AudioEnvelope;
+  readonly transcript?: readonly WordTimingInput[] | Transcript;
 }
 
 export class EditorSession {
   private readonly sourceMedia: SourceMedia;
   private audioEnvelope: AudioEnvelope | null;
+  private transcriptWords: readonly WordTiming[];
+  private captionGrouping: CaptionGroupingConfig = {
+    ...DEFAULT_CAPTION_GROUPING,
+  };
   private clips: readonly SourceClipRange[];
   private nextClipCounter = 2;
   private undoStack: HistorySnapshot[] = [];
@@ -309,6 +658,9 @@ export class EditorSession {
     this.audioEnvelope = options.audioEnvelope
       ? cloneAudioEnvelope(options.audioEnvelope)
       : null;
+    this.transcriptWords = options.transcript
+      ? normalizeWordTimings(options.transcript, sourceMedia.durationMs)
+      : [];
     this.clips = [
       {
         id: "clip-1",
@@ -331,6 +683,25 @@ export class EditorSession {
     this.notify();
   }
 
+  setTranscript(transcript: readonly WordTimingInput[] | Transcript): void {
+    const normalized = normalizeWordTimings(
+      transcript,
+      this.sourceMedia.durationMs,
+    );
+    this.transcriptWords = normalized;
+    this.undoStack = this.undoStack.map((snap) =>
+      snap.transcriptWords.length === 0
+        ? { ...snap, transcriptWords: cloneWordTimings(normalized) }
+        : snap,
+    );
+    this.redoStack = this.redoStack.map((snap) =>
+      snap.transcriptWords.length === 0
+        ? { ...snap, transcriptWords: cloneWordTimings(normalized) }
+        : snap,
+    );
+    this.notify();
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => {
@@ -350,26 +721,50 @@ export class EditorSession {
         ...c,
         transform: { ...c.transform },
       })),
+      transcriptWords: cloneWordTimings(this.transcriptWords),
       nextClipCounter: this.nextClipCounter,
     };
+  }
+
+  private commitState(
+    snapshotBefore: HistorySnapshot,
+    updates: {
+      readonly clips?: readonly SourceClipRange[];
+      readonly transcriptWords?: readonly WordTiming[];
+    },
+  ): DispatchResult {
+    this.undoStack.push(snapshotBefore);
+    this.redoStack = [];
+    if (updates.clips) {
+      this.clips = updates.clips;
+    }
+    if (updates.transcriptWords) {
+      this.transcriptWords = updates.transcriptWords;
+    }
+    this.notify();
+    return { applied: true };
   }
 
   private commitClips(
     snapshotBefore: HistorySnapshot,
     nextClips: readonly SourceClipRange[],
   ): DispatchResult {
-    this.undoStack.push(snapshotBefore);
-    this.redoStack = [];
-    this.clips = nextClips;
-    this.notify();
-    return { applied: true };
+    return this.commitState(snapshotBefore, { clips: nextClips });
   }
 
   getState(): EditorState {
+    const timeline = projectTimeline(
+      this.clips,
+      this.transcriptWords,
+      this.captionGrouping,
+    );
+    const words = cloneWordTimings(this.transcriptWords);
     return {
       sourceMedia: this.sourceMedia,
       audioEnvelope: this.audioEnvelope,
-      timeline: projectTimeline(this.clips),
+      transcript: { words },
+      projectedTranscriptWords: projectTranscriptWords(timeline.clips, words),
+      timeline,
       canUndo: this.undoStack.length > 0,
       canRedo: this.redoStack.length > 0,
     };
@@ -564,50 +959,11 @@ export class EditorSession {
         };
       }
 
-      let changed = false;
-      const nextClips: SourceClipRange[] = [];
-
-      for (const clip of this.clips) {
-        let clipRanges: Array<{ startMs: number; endMs: number }> = [
-          { startMs: clip.sourceStartMs, endMs: clip.sourceEndMs },
-        ];
-
-        for (const region of silenceRegions) {
-          clipRanges = clipRanges.flatMap((range) => {
-            if (
-              region.endMs <= range.startMs ||
-              region.startMs >= range.endMs
-            ) {
-              return [range];
-            }
-            const kept: Array<{ startMs: number; endMs: number }> = [];
-            if (region.startMs > range.startMs) {
-              kept.push({ startMs: range.startMs, endMs: region.startMs });
-            }
-            if (region.endMs < range.endMs) {
-              kept.push({ startMs: region.endMs, endMs: range.endMs });
-            }
-            return kept;
-          });
-        }
-
-        if (
-          clipRanges.length !== 1 ||
-          clipRanges[0]!.startMs !== clip.sourceStartMs ||
-          clipRanges[0]!.endMs !== clip.sourceEndMs
-        ) {
-          changed = true;
-        }
-
-        clipRanges.forEach((range, rangeIndex) => {
-          nextClips.push({
-            id: rangeIndex === 0 ? clip.id : `clip-${this.nextClipCounter++}`,
-            sourceStartMs: range.startMs,
-            sourceEndMs: range.endMs,
-            transform: { ...clip.transform },
-          });
-        });
-      }
+      const { changed, nextClips } = carveSourceIntervalsFromClips(
+        this.clips,
+        silenceRegions,
+        () => `clip-${this.nextClipCounter++}`,
+      );
 
       if (!changed) {
         return {
@@ -624,6 +980,123 @@ export class EditorSession {
       }
 
       return this.commitClips(snapshotBefore, nextClips);
+    }
+
+    if (parsed.type === "deleteWordRange") {
+      if (this.transcriptWords.length === 0) {
+        return {
+          applied: false,
+          reason: "No Transcript available to delete words from",
+        };
+      }
+
+      const startIndex = this.transcriptWords.findIndex(
+        (w) => w.id === parsed.startWordId,
+      );
+      const endIndex = this.transcriptWords.findIndex(
+        (w) => w.id === parsed.endWordId,
+      );
+      if (startIndex === -1 || endIndex === -1) {
+        return {
+          applied: false,
+          reason: "Specified Word Timing ID not found in Transcript",
+        };
+      }
+
+      const fromIndex = Math.min(startIndex, endIndex);
+      const toIndex = Math.max(startIndex, endIndex);
+      const cutStartMs = this.transcriptWords[fromIndex]!.sourceStartMs;
+      const cutEndMs = this.transcriptWords[toIndex]!.sourceEndMs;
+
+      if (cutEndMs <= cutStartMs) {
+        return {
+          applied: false,
+          reason: "Invalid Word Timing interval",
+        };
+      }
+
+      const { changed, nextClips } = carveSourceIntervalsFromClips(
+        this.clips,
+        [{ startMs: cutStartMs, endMs: cutEndMs }],
+        () => `clip-${this.nextClipCounter++}`,
+      );
+
+      if (!changed) {
+        return {
+          applied: false,
+          reason: "Selected word range is already cut from the Timeline",
+        };
+      }
+
+      if (nextClips.length === 0) {
+        return {
+          applied: false,
+          reason: "Cannot delete all remaining video from the Timeline",
+        };
+      }
+
+      return this.commitClips(snapshotBefore, nextClips);
+    }
+
+    if (parsed.type === "updateWords") {
+      if (this.transcriptWords.length === 0) {
+        return {
+          applied: false,
+          reason: "No Transcript available to update",
+        };
+      }
+
+      const updatesById = new Map<string, WordUpdate>();
+      for (const u of parsed.updates) {
+        updatesById.set(u.wordId, u);
+      }
+
+      let matchedCount = 0;
+      let changedCount = 0;
+
+      const nextWords = this.transcriptWords.map((word) => {
+        const update = updatesById.get(word.id);
+        if (!update) {
+          return word;
+        }
+        matchedCount++;
+
+        const nextText =
+          typeof update.text === "string" ? update.text.trim() : word.text;
+        if (nextText.length === 0) {
+          return word;
+        }
+        const nextEmphasis =
+          typeof update.emphasis === "boolean"
+            ? update.emphasis
+            : word.emphasis;
+
+        if (nextText !== word.text || nextEmphasis !== word.emphasis) {
+          changedCount++;
+        }
+
+        return {
+          ...word,
+          text: nextText,
+          emphasis: nextEmphasis,
+        };
+      });
+
+      if (matchedCount === 0) {
+        return {
+          applied: false,
+          reason: "No matching Word Timings found to update",
+        };
+      }
+
+      if (changedCount === 0) {
+        return {
+          applied: false,
+          reason: "Word Timing values unchanged",
+        };
+      }
+
+      return this.commitState(snapshotBefore, { transcriptWords: nextWords });
     }
 
     const clipIndex = this.clips.findIndex((c) => c.id === parsed.clipId);
@@ -675,6 +1148,7 @@ export class EditorSession {
     }
     this.redoStack.push(this.createSnapshot());
     this.clips = previous.clips;
+    this.transcriptWords = previous.transcriptWords;
     this.nextClipCounter = previous.nextClipCounter;
     this.notify();
     return true;
@@ -687,6 +1161,7 @@ export class EditorSession {
     }
     this.undoStack.push(this.createSnapshot());
     this.clips = next.clips;
+    this.transcriptWords = next.transcriptWords;
     this.nextClipCounter = next.nextClipCounter;
     this.notify();
     return true;

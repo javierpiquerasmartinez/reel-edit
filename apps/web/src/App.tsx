@@ -16,14 +16,18 @@ import {
   renderFrame,
   resolveFrameLayout,
   sliceClipWaveform,
+  transcribeSourceMedia,
   type FrameLayoutDescriptor,
+  type TranscriptionProvider,
 } from "@reel-edit/media-engine";
 import {
   ArrowLeft,
   ArrowRight,
   AudioWaveform,
+  FileText,
   Film,
   Maximize2,
+  Mic,
   Pause,
   Play,
   Redo2,
@@ -53,10 +57,23 @@ export function App() {
   const [silenceConfig, setSilenceConfig] = useState<SilenceDetectionConfig>(
     DEFAULT_SILENCE_CONFIG,
   );
+  const [transcriptionProvider, setTranscriptionProvider] =
+    useState<TranscriptionProvider>("local-whisper");
+  const [openAiApiKey, setOpenAiApiKey] = useState<string>("");
+  const [isTranscribing, setIsTranscribing] = useState<boolean>(false);
+  const [transcriptionBadge, setTranscriptionBadge] = useState<string | null>(
+    null,
+  );
+  const [selectedWordRange, setSelectedWordRange] = useState<{
+    startWordId: string;
+    endWordId: string;
+  } | null>(null);
+  const [editingWordText, setEditingWordText] = useState<string>("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const sourceFileRef = useRef<File | null>(null);
   const decodedEnvelopePromiseRef = useRef<Promise<AudioEnvelope> | null>(null);
   const activeClipIdRef = useRef<string>("clip-1");
   const timelineTimeMsRef = useRef<number>(0);
@@ -110,6 +127,9 @@ export function App() {
       setSelectedClipIds(["clip-1"]);
       activeClipIdRef.current = "clip-1";
       setIsPlaying(false);
+      setTranscriptionBadge(null);
+      setSelectedWordRange(null);
+      setEditingWordText("");
       setStatusMessage(null);
 
       const envelopePromise = decodedEnvelopePromiseRef.current;
@@ -130,6 +150,7 @@ export function App() {
       return;
     }
 
+    sourceFileRef.current = file;
     decodedEnvelopePromiseRef.current = decodeSourceMediaAudioEnvelope(file, {
       bucketDurationMs: 100,
     });
@@ -498,6 +519,110 @@ export function App() {
     );
   }, [session, silenceConfig]);
 
+  const handleTranscribeAudio = useCallback(async () => {
+    if (!session || !editorState) {
+      return;
+    }
+    setIsTranscribing(true);
+    try {
+      const sourceInput = sourceFileRef.current ?? new ArrayBuffer(0);
+      const result = await transcribeSourceMedia(sourceInput, {
+        provider: transcriptionProvider,
+        openAiApiKey,
+        sourceDurationMs: editorState.sourceMedia.durationMs,
+      });
+      session.setTranscript(result.words);
+      const firstWord = result.words[0];
+      if (firstWord) {
+        setSelectedWordRange({
+          startWordId: firstWord.id,
+          endWordId: firstWord.id,
+        });
+        setEditingWordText(firstWord.text);
+      }
+      setTranscriptionBadge(
+        `16kHz Mono · ${result.words.length} words · ${result.model}`,
+      );
+      setStatusMessage(
+        `Generated Transcript (${result.words.length} Word Timings via ${result.model})`,
+      );
+    } catch (err) {
+      setStatusMessage(
+        err instanceof Error ? err.message : "Transcription failed",
+      );
+    } finally {
+      setIsTranscribing(false);
+    }
+  }, [editorState, openAiApiKey, session, transcriptionProvider]);
+
+  const handleWordClick = useCallback(
+    (
+      word: {
+        readonly id: string;
+        readonly text: string;
+        readonly isActive: boolean;
+        readonly timelineStartMs: number | null;
+      },
+      extendSelection: boolean,
+    ) => {
+      if (extendSelection && selectedWordRange) {
+        setSelectedWordRange({
+          startWordId: selectedWordRange.startWordId,
+          endWordId: word.id,
+        });
+      } else {
+        setSelectedWordRange({
+          startWordId: word.id,
+          endWordId: word.id,
+        });
+        setEditingWordText(word.text);
+      }
+
+      if (word.isActive && word.timelineStartMs !== null) {
+        seekToTimelineTime(word.timelineStartMs);
+      }
+    },
+    [seekToTimelineTime, selectedWordRange],
+  );
+
+  const handleSaveWordText = useCallback(() => {
+    if (!session || !selectedWordRange) {
+      return;
+    }
+    const trimmed = editingWordText.trim();
+    if (!trimmed) {
+      return;
+    }
+    const res = session.dispatch({
+      type: "updateWords",
+      updates: [
+        {
+          wordId: selectedWordRange.startWordId,
+          text: trimmed,
+        },
+      ],
+    });
+    setStatusMessage(
+      res.applied ? "Updated Caption word text" : (res.reason ?? null),
+    );
+  }, [editingWordText, selectedWordRange, session]);
+
+  const handleDeleteSelectedWords = useCallback(() => {
+    if (!session || !selectedWordRange) {
+      return;
+    }
+    const res = session.dispatch({
+      type: "deleteWordRange",
+      startWordId: selectedWordRange.startWordId,
+      endWordId: selectedWordRange.endWordId,
+    });
+    setStatusMessage(
+      res.applied
+        ? "Cut selected Word Timing range with Ripple Delete"
+        : (res.reason ?? null),
+    );
+  }, [selectedWordRange, session]);
+
   const handleUndo = useCallback(() => {
     if (!session) {
       return;
@@ -653,8 +778,8 @@ export function App() {
         </main>
       ) : (
         <main className="flex-1 grid grid-rows-[1fr_auto] overflow-hidden">
-          {/* Upper Zone: Source Media Info + 9:16 Vertical Canvas Player */}
-          <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-6 p-6 overflow-y-auto">
+          {/* Upper Zone: Source Media Info + 9:16 Vertical Canvas Player + Transcript Panel */}
+          <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr_340px] gap-6 p-6 overflow-y-auto">
             {/* Left Inspector: Source Media & Active Clip Metadata */}
             <aside className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-4 self-start">
               <div>
@@ -945,6 +1070,15 @@ export function App() {
                   className="w-full h-full object-contain"
                 />
 
+                {currentLayout?.activeCaption && (
+                  <div
+                    data-testid="active-caption-overlay"
+                    className="pointer-events-none sr-only"
+                  >
+                    {currentLayout.activeCaption.text}
+                  </div>
+                )}
+
                 {showSafeArea && currentLayout?.safeArea && (
                   <div
                     data-testid="safe-area-indicator"
@@ -1001,6 +1135,174 @@ export function App() {
                 </button>
               </div>
             </section>
+
+            {/* Right Panel: Hybrid Transcription & Interactive Transcript Editor */}
+            <aside
+              aria-label="Transcript"
+              className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-4 self-start"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
+                  <FileText className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Transcript &amp; Captions</span>
+                </div>
+                {transcriptionBadge && (
+                  <span
+                    data-testid="transcription-badge"
+                    className="rounded bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[10px] font-mono text-emerald-300"
+                  >
+                    {transcriptionBadge}
+                  </span>
+                )}
+              </div>
+
+              {/* Hybrid Whisper Provider Controls (16kHz Mono Extraction) */}
+              <div className="space-y-2.5">
+                <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                  <span>Transcription Provider</span>
+                  <select
+                    aria-label="Transcription Provider"
+                    value={transcriptionProvider}
+                    onChange={(e) =>
+                      setTranscriptionProvider(
+                        e.target.value as TranscriptionProvider,
+                      )
+                    }
+                    className="rounded-lg bg-zinc-950 border border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-200"
+                  >
+                    <option value="local-whisper">
+                      Local Browser Whisper (Free · WebGPU/Wasm)
+                    </option>
+                    <option value="openai">
+                      OpenAI Whisper (whisper-1 · Word Timings)
+                    </option>
+                  </select>
+                </label>
+
+                {transcriptionProvider === "openai" && (
+                  <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                    <span>OpenAI API Key</span>
+                    <input
+                      aria-label="OpenAI API Key"
+                      type="password"
+                      placeholder="sk-..."
+                      value={openAiApiKey}
+                      onChange={(e) => setOpenAiApiKey(e.target.value)}
+                      className="rounded-lg bg-zinc-950 border border-zinc-800 px-2.5 py-1.5 text-xs font-mono text-zinc-200"
+                    />
+                  </label>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => void handleTranscribeAudio()}
+                  disabled={isTranscribing}
+                  className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/20 hover:bg-emerald-500/30 disabled:opacity-40 px-3 py-1.5 text-xs font-semibold text-emerald-200 transition"
+                >
+                  <Mic className="w-3.5 h-3.5" />
+                  <span>
+                    {isTranscribing
+                      ? "Downsampling 16kHz & Transcribing..."
+                      : "Transcribe Audio"}
+                  </span>
+                </button>
+              </div>
+
+              {/* Interactive Word-Level Transcript & Text-Based Video Editing */}
+              {editorState.projectedTranscriptWords.length === 0 ? (
+                <p className="text-xs text-zinc-400 border-t border-zinc-800 pt-3">
+                  Generate a Transcript to click words to seek, edit Caption
+                  spelling, or select and delete spoken phrases with Ripple
+                  Delete.
+                </p>
+              ) : (
+                <div className="border-t border-zinc-800 pt-3 space-y-3">
+                  <div className="flex flex-wrap gap-1.5 max-h-52 overflow-y-auto p-2 rounded-lg bg-zinc-950/80 border border-zinc-800/80">
+                    {editorState.projectedTranscriptWords.map((word, idx) => {
+                      const words = editorState.projectedTranscriptWords;
+                      const startIdx = selectedWordRange
+                        ? words.findIndex(
+                            (w) => w.id === selectedWordRange.startWordId,
+                          )
+                        : -1;
+                      const endIdx = selectedWordRange
+                        ? words.findIndex(
+                            (w) => w.id === selectedWordRange.endWordId,
+                          )
+                        : -1;
+                      const fromIdx =
+                        startIdx !== -1 && endIdx !== -1
+                          ? Math.min(startIdx, endIdx)
+                          : -1;
+                      const toIdx =
+                        startIdx !== -1 && endIdx !== -1
+                          ? Math.max(startIdx, endIdx)
+                          : -1;
+                      const isWordSelected =
+                        fromIdx !== -1 && idx >= fromIdx && idx <= toIdx;
+
+                      return (
+                        <button
+                          key={word.id}
+                          type="button"
+                          data-testid={`transcript-word-${word.id}`}
+                          data-word-active={word.isActive ? "true" : "false"}
+                          onClick={(e) => handleWordClick(word, e.shiftKey)}
+                          className={`rounded px-1.5 py-0.5 text-xs font-medium transition ${
+                            !word.isActive
+                              ? "line-through opacity-45 text-zinc-500 bg-zinc-900 border border-zinc-800/60"
+                              : isWordSelected
+                                ? "bg-emerald-500/25 border border-emerald-400 text-emerald-100"
+                                : "bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-800"
+                          }`}
+                        >
+                          {word.text}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Word Text Correction & Phrase Ripple-Delete Controls */}
+                  {selectedWordRange && (
+                    <div className="space-y-2 pt-1">
+                      {selectedWordRange.startWordId ===
+                        selectedWordRange.endWordId && (
+                        <div className="flex items-end gap-1.5">
+                          <label className="flex-1 flex flex-col gap-1 text-[11px] text-zinc-400">
+                            <span>Edit Selected Word Text</span>
+                            <input
+                              aria-label="Edit selected word text"
+                              type="text"
+                              value={editingWordText}
+                              onChange={(e) =>
+                                setEditingWordText(e.target.value)
+                              }
+                              className="rounded-lg bg-zinc-950 border border-zinc-800 px-2.5 py-1 text-xs text-zinc-100"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={handleSaveWordText}
+                            className="rounded-lg border border-sky-500/40 bg-sky-500/20 hover:bg-sky-500/30 px-2.5 py-1 text-xs font-semibold text-sky-200 transition"
+                          >
+                            Save Word Text
+                          </button>
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={handleDeleteSelectedWords}
+                        className="w-full inline-flex items-center justify-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/20 hover:bg-rose-500/30 px-3 py-1.5 text-xs font-semibold text-rose-200 transition"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Delete Selected Words (Ripple Delete)</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </aside>
           </div>
 
           {/* Lower Zone: Non-Destructive Timeline & Edit Command Toolbar */}

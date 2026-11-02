@@ -637,4 +637,315 @@ describe("EditorSession", () => {
     expect(session.getState().timeline.durationMs).toBe(7000);
     expect(session.getState().timeline.clips).toHaveLength(3);
   });
+
+  test("projects Source-Time Word Timings into Timeline-Time Captions accurately across cuts made both before and after transcription, and restores cut Captions on Undo", () => {
+    const transcriptWords = [
+      { id: "w-1", text: "Welcome", sourceStartMs: 200, sourceEndMs: 800 },
+      { id: "w-2", text: "to", sourceStartMs: 850, sourceEndMs: 1100 },
+      { id: "w-3", text: "Reel", sourceStartMs: 1150, sourceEndMs: 1500 },
+      { id: "w-4", text: "Edit.", sourceStartMs: 1550, sourceEndMs: 2000 },
+      // False take in [3000..6000ms]
+      { id: "w-5", text: "Wait", sourceStartMs: 3200, sourceEndMs: 3700 },
+      { id: "w-6", text: "let", sourceStartMs: 3800, sourceEndMs: 4100 },
+      { id: "w-7", text: "me", sourceStartMs: 4150, sourceEndMs: 4400 },
+      { id: "w-8", text: "restart.", sourceStartMs: 4450, sourceEndMs: 5200 },
+      // Final take in [6000..10000ms]
+      { id: "w-9", text: "Ship", sourceStartMs: 6200, sourceEndMs: 6700 },
+      { id: "w-10", text: "faster", sourceStartMs: 6800, sourceEndMs: 7300 },
+      { id: "w-11", text: "videos!", sourceStartMs: 7400, sourceEndMs: 8100 },
+    ];
+
+    // Case A: Cut [3000..6000ms] BEFORE transcription, then load Transcript
+    const sessionCutBefore = EditorSession.fromSourceMedia({
+      id: "source-a",
+      fileName: "cut-before-stt.mp4",
+      durationMs: 10000,
+      width: 1080,
+      height: 1920,
+    });
+    sessionCutBefore.dispatch({ type: "splitClip", timelineTimeMs: 3000 });
+    sessionCutBefore.dispatch({ type: "splitClip", timelineTimeMs: 6000 });
+    sessionCutBefore.dispatch({ type: "deleteClips", clipIds: ["clip-2"] });
+
+    // Now set the Transcript anchored in Source Time
+    sessionCutBefore.setTranscript(transcriptWords);
+
+    // Case B: Load Transcript first, then cut [3000..6000ms] AFTER transcription
+    const sessionCutAfter = EditorSession.fromSourceMedia(
+      {
+        id: "source-b",
+        fileName: "cut-after-stt.mp4",
+        durationMs: 10000,
+        width: 1080,
+        height: 1920,
+      },
+      { transcript: transcriptWords },
+    );
+    sessionCutAfter.dispatch({ type: "splitClip", timelineTimeMs: 3000 });
+    sessionCutAfter.dispatch({ type: "splitClip", timelineTimeMs: 6000 });
+    sessionCutAfter.dispatch({ type: "deleteClips", clipIds: ["clip-2"] });
+
+    // Both sessions must produce the exact same projected Captions in Timeline Time
+    const captionsBefore = sessionCutBefore.getState().timeline.captions;
+    const captionsAfter = sessionCutAfter.getState().timeline.captions;
+    expect(captionsBefore).toEqual(captionsAfter);
+    expect(captionsAfter).toHaveLength(2);
+
+    // First Caption in clip-1 [0..3000ms]: "Welcome to Reel Edit." at [200..2000ms] Timeline Time
+    expect(captionsAfter[0]?.text).toBe("Welcome to Reel Edit.");
+    expect(captionsAfter[0]?.clipId).toBe("clip-1");
+    expect(captionsAfter[0]?.timelineStartMs).toBe(200);
+    expect(captionsAfter[0]?.timelineEndMs).toBe(2000);
+
+    // Second Caption in clip-3 (source [6000..10000ms] -> timeline [3000..7000ms]):
+    // "Ship faster videos!" shifted by -3000ms to [3200..5100ms] Timeline Time
+    expect(captionsAfter[1]?.text).toBe("Ship faster videos!");
+    expect(captionsAfter[1]?.clipId).toBe("clip-3");
+    expect(captionsAfter[1]?.sourceStartMs).toBe(6200);
+    expect(captionsAfter[1]?.sourceEndMs).toBe(8100);
+    expect(captionsAfter[1]?.timelineStartMs).toBe(3200);
+    expect(captionsAfter[1]?.timelineEndMs).toBe(5100);
+    expect(
+      captionsAfter[1]?.words.map((w) => ({
+        wordId: w.wordId,
+        text: w.text,
+        timelineStartMs: w.timelineStartMs,
+        timelineEndMs: w.timelineEndMs,
+      })),
+    ).toEqual([
+      {
+        wordId: "w-9",
+        text: "Ship",
+        timelineStartMs: 3200,
+        timelineEndMs: 3700,
+      },
+      {
+        wordId: "w-10",
+        text: "faster",
+        timelineStartMs: 3800,
+        timelineEndMs: 4300,
+      },
+      {
+        wordId: "w-11",
+        text: "videos!",
+        timelineStartMs: 4400,
+        timelineEndMs: 5100,
+      },
+    ]);
+
+    // Cut words w-5..w-8 are marked inactive in projectedTranscriptWords while active words have exact timelineStartMs
+    const projectedWords = sessionCutAfter.getState().projectedTranscriptWords;
+    expect(
+      projectedWords.filter((w) => !w.isActive).map((w) => w.id),
+    ).toEqual(["w-5", "w-6", "w-7", "w-8"]);
+    expect(projectedWords.find((w) => w.id === "w-9")?.timelineStartMs).toBe(
+      3200,
+    );
+
+    // Undoing the clip deletion in both sessions restores the cut middle Caption ("Wait let me restart.")
+    expect(sessionCutBefore.undo()).toBe(true);
+    expect(sessionCutAfter.undo()).toBe(true);
+    expect(
+      sessionCutBefore.getState().timeline.captions.map((c) => c.text),
+    ).toEqual([
+      "Welcome to Reel Edit.",
+      "Wait let me restart.",
+      "Ship faster videos!",
+    ]);
+    expect(
+      sessionCutAfter.getState().timeline.captions.map((c) => c.text),
+    ).toEqual([
+      "Welcome to Reel Edit.",
+      "Wait let me restart.",
+      "Ship faster videos!",
+    ]);
+  });
+
+  test("deleteWordRange cuts the corresponding Source Time interval from overlapping Clips with Ripple Delete and supports Undo/Redo", () => {
+    const session = EditorSession.fromSourceMedia(
+      {
+        id: "source-1",
+        fileName: "script-edit.mp4",
+        durationMs: 10000,
+        width: 1080,
+        height: 1920,
+      },
+      {
+        transcript: [
+          { id: "w-1", text: "First", sourceStartMs: 500, sourceEndMs: 1000 },
+          { id: "w-2", text: "point.", sourceStartMs: 1100, sourceEndMs: 1800 },
+          { id: "w-3", text: "Um", sourceStartMs: 2500, sourceEndMs: 3100 },
+          { id: "w-4", text: "bad", sourceStartMs: 3200, sourceEndMs: 3800 },
+          { id: "w-5", text: "take.", sourceStartMs: 3900, sourceEndMs: 4500 },
+          { id: "w-6", text: "Second", sourceStartMs: 5200, sourceEndMs: 5800 },
+          { id: "w-7", text: "point!", sourceStartMs: 5900, sourceEndMs: 6600 },
+        ],
+      },
+    );
+
+    // Delete spoken phrase w-3..w-5 ("Um bad take." spanning [2500..4500ms] Source Time)
+    const deleteRes = session.dispatch({
+      type: "deleteWordRange",
+      startWordId: "w-3",
+      endWordId: "w-5",
+    });
+    expect(deleteRes.applied).toBe(true);
+
+    // Clip-1 [0..10000ms] is carved into clip-1 [0..2500ms] and clip-2 [4500..10000ms] (total 8000ms)
+    const afterDelete = session.getState();
+    expect(afterDelete.timeline.durationMs).toBe(8000);
+    expect(afterDelete.timeline.clips).toEqual([
+      {
+        id: "clip-1",
+        sourceStartMs: 0,
+        sourceEndMs: 2500,
+        timelineStartMs: 0,
+        timelineEndMs: 2500,
+        durationMs: 2500,
+        transform: DEFAULT_TRANSFORM,
+      },
+      {
+        id: "clip-2",
+        sourceStartMs: 4500,
+        sourceEndMs: 10000,
+        timelineStartMs: 2500,
+        timelineEndMs: 8000,
+        durationMs: 5500,
+        transform: DEFAULT_TRANSFORM,
+      },
+    ]);
+
+    // Remaining Captions are "First point." [500..1800ms] and "Second point!" shifted by -2000ms to [3200..4600ms]
+    expect(afterDelete.timeline.captions.map((c) => ({
+      text: c.text,
+      timelineStartMs: c.timelineStartMs,
+      timelineEndMs: c.timelineEndMs,
+    }))).toEqual([
+      {
+        text: "First point.",
+        timelineStartMs: 500,
+        timelineEndMs: 1800,
+      },
+      {
+        text: "Second point!",
+        timelineStartMs: 3200,
+        timelineEndMs: 4600,
+      },
+    ]);
+
+    // Deleted words w-3, w-4, w-5 are marked inactive in projectedTranscriptWords
+    expect(
+      afterDelete.projectedTranscriptWords
+        .filter((w) => !w.isActive)
+        .map((w) => w.id),
+    ).toEqual(["w-3", "w-4", "w-5"]);
+
+    // Attempting to delete an already-cut word range is rejected
+    expect(
+      session.dispatch({
+        type: "deleteWordRange",
+        startWordId: "w-3",
+        endWordId: "w-5",
+      }).applied,
+    ).toBe(false);
+
+    // Undo restores the 10000ms Timeline and all 3 Captions
+    expect(session.undo()).toBe(true);
+    expect(session.getState().timeline.durationMs).toBe(10000);
+    expect(session.getState().timeline.captions.map((c) => c.text)).toEqual([
+      "First point.",
+      "Um bad take.",
+      "Second point!",
+    ]);
+
+    // Redo re-applies the text-based video cut
+    expect(session.redo()).toBe(true);
+    expect(session.getState().timeline.durationMs).toBe(8000);
+    expect(session.getState().timeline.captions.map((c) => c.text)).toEqual([
+      "First point.",
+      "Second point!",
+    ]);
+  });
+
+  test("updateWords modifies word text and Word Emphasis without altering Word Timings and supports Undo/Redo", () => {
+    const session = EditorSession.fromSourceMedia(
+      {
+        id: "source-1",
+        fileName: "typo-fix.mp4",
+        durationMs: 5000,
+        width: 1080,
+        height: 1920,
+      },
+      {
+        transcript: [
+          { id: "w-1", text: "Build", sourceStartMs: 300, sourceEndMs: 700 },
+          { id: "w-2", text: "real", sourceStartMs: 750, sourceEndMs: 1100 },
+          { id: "w-3", text: "edits.", sourceStartMs: 1150, sourceEndMs: 1700 },
+        ],
+      },
+    );
+
+    const updateRes = session.dispatch({
+      type: "updateWords",
+      updates: [
+        { wordId: "w-2", text: "Reel", emphasis: true },
+        { wordId: "w-3", text: "Edits!" },
+      ],
+    });
+    expect(updateRes.applied).toBe(true);
+
+    const state = session.getState();
+    expect(state.timeline.captions).toHaveLength(1);
+    expect(state.timeline.captions[0]?.text).toBe("Build Reel Edits!");
+    expect(state.timeline.captions[0]?.words).toEqual([
+      {
+        wordId: "w-1",
+        clipId: "clip-1",
+        text: "Build",
+        sourceStartMs: 300,
+        sourceEndMs: 700,
+        timelineStartMs: 300,
+        timelineEndMs: 700,
+        emphasis: false,
+      },
+      {
+        wordId: "w-2",
+        clipId: "clip-1",
+        text: "Reel",
+        sourceStartMs: 750,
+        sourceEndMs: 1100,
+        timelineStartMs: 750,
+        timelineEndMs: 1100,
+        emphasis: true,
+      },
+      {
+        wordId: "w-3",
+        clipId: "clip-1",
+        text: "Edits!",
+        sourceStartMs: 1150,
+        sourceEndMs: 1700,
+        timelineStartMs: 1150,
+        timelineEndMs: 1700,
+        emphasis: false,
+      },
+    ]);
+
+    // Undo restores original spelling ("Build real edits.") and emphasis: false
+    expect(session.undo()).toBe(true);
+    expect(session.getState().timeline.captions[0]?.text).toBe(
+      "Build real edits.",
+    );
+    expect(
+      session.getState().timeline.captions[0]?.words[1]?.emphasis,
+    ).toBe(false);
+
+    // Redo re-applies "Build Reel Edits!"
+    expect(session.redo()).toBe(true);
+    expect(session.getState().timeline.captions[0]?.text).toBe(
+      "Build Reel Edits!",
+    );
+    expect(
+      session.getState().timeline.captions[0]?.words[1]?.emphasis,
+    ).toBe(true);
+  });
 });

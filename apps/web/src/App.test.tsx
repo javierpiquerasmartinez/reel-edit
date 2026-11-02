@@ -282,4 +282,131 @@ describe("Reel Edit Web Workspace (Issue 01)", () => {
       "2 cuts · 3.2s saved",
     );
   });
+
+  test("transcribes 16kHz mono audio (local Whisper and OpenAI whisper-1), projects Source-Time Captions onto 9:16 player, seeks on word click, edits word text via updateWords, and Ripple-Deletes video via deleteWordRange with Undo/Redo", async () => {
+    render(<App />);
+
+    // 1. Import Source Media
+    const fileInput = screen.getByLabelText(/import source media/i);
+    const fakeVideoFile = new File(["video-bytes"], "scripted-reel.mp4", {
+      type: "video/mp4",
+    });
+    fireEvent.change(fileInput, { target: { files: [fakeVideoFile] } });
+
+    // 2. Transcribe using built-in Local Browser Whisper without any API key
+    const transcribeBtn = screen.getByRole("button", {
+      name: /transcribe audio/i,
+    });
+    fireEvent.click(transcribeBtn);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("transcription-badge").textContent).toContain(
+        "16kHz Mono",
+      );
+    });
+    expect(
+      screen.getAllByTestId(/^transcript-word-/).length,
+    ).toBeGreaterThan(3);
+
+    // 3. Switch to OpenAI whisper-1 with API key and re-transcribe to verify hybrid provider
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          words: [
+            { word: "Hook", start: 0.4, end: 0.9 },
+            { word: "viewers", start: 1.0, end: 1.6 },
+            { word: "fast.", start: 1.7, end: 2.3 },
+            { word: "Um", start: 3.0, end: 3.5 },
+            { word: "wrong", start: 3.6, end: 4.2 },
+            { word: "take.", start: 4.3, end: 5.0 },
+            { word: "Ship", start: 6.0, end: 6.6 },
+            { word: "your", start: 6.7, end: 7.2 },
+            { word: "reel!", start: 7.3, end: 8.0 },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    fireEvent.change(screen.getByLabelText(/transcription provider/i), {
+      target: { value: "openai" },
+    });
+    fireEvent.change(screen.getByLabelText(/openai api key/i), {
+      target: { value: "sk-live-whisper-key" },
+    });
+    fireEvent.click(transcribeBtn);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("transcript-word-word-1").textContent).toContain(
+        "Hook",
+      );
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // 4. Click word-7 ("Ship" at 6000ms Source Time / 6000ms Timeline Time) -> seeks playhead to 00:06.000
+    fireEvent.click(screen.getByTestId("transcript-word-word-7"));
+    expect(screen.getByTestId("playhead-time").textContent).toBe("00:06.000");
+    expect(screen.getByTestId("active-caption-overlay").textContent).toContain(
+      "Ship your reel!",
+    );
+
+    // 5. Edit word-9 text ("reel!" -> "Reels!") via updateWords without altering Word Timings
+    fireEvent.click(screen.getByTestId("transcript-word-word-9"));
+    const wordTextInput = screen.getByLabelText(/edit selected word text/i);
+    fireEvent.change(wordTextInput, { target: { value: "Reels!" } });
+    fireEvent.click(screen.getByRole("button", { name: /save word text/i }));
+
+    expect(screen.getByTestId("transcript-word-word-9").textContent).toContain(
+      "Reels!",
+    );
+    expect(screen.getByTestId("active-caption-overlay").textContent).toContain(
+      "Ship your Reels!",
+    );
+
+    // 6. Select phrase word-4..word-6 ("Um wrong take." spanning [3000..5000ms] Source Time) and delete it
+    fireEvent.click(screen.getByTestId("transcript-word-word-4"));
+    fireEvent.click(screen.getByTestId("transcript-word-word-6"), {
+      shiftKey: true,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /delete selected words/i }),
+    );
+
+    // Timeline duration ripple-deletes 2000ms: 12000ms -> 10000ms
+    expect(screen.getByTestId("timeline-duration").textContent).toBe("00:10.000");
+
+    // Deleted words word-4, word-5, word-6 appear struck-through / inactive
+    expect(
+      screen
+        .getByTestId("transcript-word-word-4")
+        .getAttribute("data-word-active"),
+    ).toBe("false");
+    expect(
+      screen
+        .getByTestId("transcript-word-word-5")
+        .getAttribute("data-word-active"),
+    ).toBe("false");
+    expect(
+      screen
+        .getByTestId("transcript-word-word-6")
+        .getAttribute("data-word-active"),
+    ).toBe("false");
+
+    // Clicking word-7 ("Ship", sourceStartMs 6000ms) now seeks to shifted Timeline Time 4000ms (00:04.000)
+    fireEvent.click(screen.getByTestId("transcript-word-word-7"));
+    expect(screen.getByTestId("playhead-time").textContent).toBe("00:04.000");
+    expect(screen.getByTestId("active-caption-overlay").textContent).toContain(
+      "Ship your Reels!",
+    );
+
+    // 7. Undo restores the deleted phrase [3000..5000ms] and returns Timeline duration to 00:12.000
+    fireEvent.keyDown(window, { key: "z", metaKey: true });
+    expect(screen.getByTestId("timeline-duration").textContent).toBe("00:12.000");
+    expect(
+      screen
+        .getByTestId("transcript-word-word-4")
+        .getAttribute("data-word-active"),
+    ).toBe("true");
+  });
 });

@@ -1,13 +1,17 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { EditorSession } from "@reel-edit/editor-core";
 import {
   decodeSourceMediaAudioEnvelope,
   detectSilenceRegions,
+  downsampleAudioBufferTo16kHzMono,
   evaluatePlaybackStep,
+  extract16kHzMonoAudio,
   extractAudioEnvelopeFromSamples,
   projectSilencePreview,
+  renderFrame,
   resolveFrameLayout,
   sliceClipWaveform,
+  transcribeSourceMedia,
 } from "./index.js";
 
 describe("media-engine 9:16 frame compositor descriptor", () => {
@@ -388,5 +392,275 @@ describe("media-engine 9:16 frame compositor descriptor", () => {
     );
     expect(clip2Slice).toHaveLength(9);
     expect(clip2Slice.some((bar) => bar.isSilent)).toBe(true);
+  });
+
+  test("downsamples multi-channel high-rate Source Media audio to compact 16kHz mono PCM WAV prior to transcription", async () => {
+    // 2 seconds of 48kHz stereo audio (96,000 samples per channel)
+    const left = new Float32Array(96000).fill(0.6);
+    const right = new Float32Array(96000).fill(0.2);
+
+    const payload = await downsampleAudioBufferTo16kHzMono({
+      duration: 2,
+      sampleRate: 48000,
+      numberOfChannels: 2,
+      getChannelData: (ch) => (ch === 0 ? left : right),
+    });
+
+    expect(payload.sampleRateHz).toBe(16000);
+    expect(payload.channels).toBe(1);
+    expect(payload.durationMs).toBe(2000);
+    // 2 seconds at 16,000 Hz = 32,000 mono samples
+    expect(payload.samples).toHaveLength(32000);
+    expect(payload.samples[0]).toBeCloseTo(0.4, 2);
+
+    // 44-byte WAV header + 32,000 * 2 bytes (16-bit PCM) = 64,044 bytes
+    expect(payload.wavBytes.byteLength).toBe(64044);
+    const headerAscii = String.fromCharCode(
+      ...payload.wavBytes.slice(0, 4),
+      ...payload.wavBytes.slice(8, 12),
+    );
+    expect(headerAscii).toBe("RIFFWAVE");
+
+    // Verify extract16kHzMonoAudio decodes via AudioContext and renders via OfflineAudioContext at 16000Hz mono
+    const offlineRenderSpy = vi.fn(async () => ({
+      duration: 1,
+      sampleRate: 16000,
+      numberOfChannels: 1,
+      getChannelData: () => new Float32Array(16000).fill(0.5),
+    }));
+    const extracted = await extract16kHzMonoAudio(new ArrayBuffer(32), {
+      audioContextFactory: () => ({
+        decodeAudioData: async () => ({
+          duration: 1,
+          sampleRate: 44100,
+          numberOfChannels: 1,
+          getChannelData: () => new Float32Array(44100).fill(0.5),
+        }),
+      }),
+      offlineAudioContextFactory: (channels, length, sampleRate) => {
+        expect(channels).toBe(1);
+        expect(length).toBe(16000);
+        expect(sampleRate).toBe(16000);
+        return {
+          destination: {},
+          createBuffer: (_c, l, s) => ({
+            duration: l / s,
+            sampleRate: s,
+            numberOfChannels: 1,
+            getChannelData: () => new Float32Array(l),
+          }),
+          createBufferSource: () => ({
+            buffer: null,
+            connect: vi.fn(),
+            start: vi.fn(),
+          }),
+          startRendering: offlineRenderSpy,
+        };
+      },
+    });
+    expect(offlineRenderSpy).toHaveBeenCalledTimes(1);
+    expect(extracted.sampleRateHz).toBe(16000);
+    expect(extracted.channels).toBe(1);
+    expect(extracted.samples).toHaveLength(16000);
+  });
+
+  test("transcribeSourceMedia supports both OpenAI whisper-1 (with API key) and built-in local browser Whisper worker (without API key), producing Source-Time Word Timings", async () => {
+    // 3 seconds of 48kHz audio
+    const mockAudioContextFactory = () => ({
+      decodeAudioData: async () => ({
+        duration: 3,
+        sampleRate: 48000,
+        numberOfChannels: 1,
+        getChannelData: () => {
+          const buf = new Float32Array(144000);
+          for (let i = 0; i < buf.length; i++) {
+            const ms = (i / 48000) * 1000;
+            buf[i] = ms >= 200 && ms <= 2600 ? 0.5 : 0.001;
+          }
+          return buf;
+        },
+      }),
+    });
+
+    // 1. OpenAI whisper-1 transcription with 16kHz mono payload
+    const fetchSpy = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string> | undefined;
+      expect(headers?.Authorization).toBe("Bearer sk-test-openai-key");
+      const formData = init?.body as FormData;
+      expect(formData.get("model")).toBe("whisper-1");
+      expect(formData.get("response_format")).toBe("verbose_json");
+      expect(formData.get("timestamp_granularities[]")).toBe("word");
+
+      return new Response(
+        JSON.stringify({
+          words: [
+            { word: "Creator", start: 0.25, end: 0.75 },
+            { word: "workflow", start: 0.8, end: 1.4 },
+            { word: "rocks.", start: 1.45, end: 2.1 },
+          ],
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const openAiResult = await transcribeSourceMedia(new ArrayBuffer(64), {
+      provider: "openai",
+      openAiApiKey: "sk-test-openai-key",
+      fetchImpl: fetchSpy as unknown as typeof fetch,
+      audioContextFactory: mockAudioContextFactory,
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(openAiResult.provider).toBe("openai");
+    expect(openAiResult.audioPayload.sampleRateHz).toBe(16000);
+    expect(openAiResult.words).toEqual([
+      {
+        id: "word-1",
+        text: "Creator",
+        sourceStartMs: 250,
+        sourceEndMs: 750,
+        emphasis: false,
+      },
+      {
+        id: "word-2",
+        text: "workflow",
+        sourceStartMs: 800,
+        sourceEndMs: 1400,
+        emphasis: false,
+      },
+      {
+        id: "word-3",
+        text: "rocks.",
+        sourceStartMs: 1450,
+        sourceEndMs: 2100,
+        emphasis: false,
+      },
+    ]);
+
+    // 2. Local browser Whisper Web Worker transcription without any API key
+    const workerTerminateSpy = vi.fn();
+    const localResult = await transcribeSourceMedia(new ArrayBuffer(64), {
+      provider: "local-whisper",
+      audioContextFactory: mockAudioContextFactory,
+      workerFactory: () => {
+        const worker = {
+          onmessage: null as ((event: { data: unknown }) => void) | null,
+          onerror: null as ((event: { message?: string }) => void) | null,
+          terminate: workerTerminateSpy,
+          postMessage(msg: {
+            readonly type: "transcribe";
+            readonly model: string;
+            readonly audio: Float32Array;
+            readonly sampleRateHz: 16000;
+          }) {
+            expect(msg.type).toBe("transcribe");
+            expect(msg.model).toBe("onnx-community/whisper-tiny.en");
+            expect(msg.sampleRateHz).toBe(16000);
+            expect(msg.audio).toHaveLength(48000);
+            worker.onmessage?.({
+              data: {
+                type: "result",
+                words: [
+                  {
+                    id: "word-1",
+                    text: "Local",
+                    sourceStartMs: 300,
+                    sourceEndMs: 800,
+                  },
+                  {
+                    id: "word-2",
+                    text: "Whisper!",
+                    sourceStartMs: 850,
+                    sourceEndMs: 1500,
+                  },
+                ],
+              },
+            });
+          },
+        };
+        return worker;
+      },
+    });
+
+    expect(workerTerminateSpy).toHaveBeenCalledTimes(1);
+    expect(localResult.provider).toBe("local-whisper");
+    expect(localResult.model).toBe("onnx-community/whisper-tiny.en");
+    expect(localResult.audioPayload.sampleRateHz).toBe(16000);
+    expect(localResult.words).toEqual([
+      {
+        id: "word-1",
+        text: "Local",
+        sourceStartMs: 300,
+        sourceEndMs: 800,
+        emphasis: false,
+      },
+      {
+        id: "word-2",
+        text: "Whisper!",
+        sourceStartMs: 850,
+        sourceEndMs: 1500,
+        emphasis: false,
+      },
+    ]);
+  });
+
+  test("resolves active Caption and spoken word in resolveFrameLayout and renders updated Caption text on the 9:16 canvas", () => {
+    const session = EditorSession.fromSourceMedia(
+      {
+        id: "source-1",
+        fileName: "captions.mp4",
+        durationMs: 8000,
+        width: 1080,
+        height: 1920,
+      },
+      {
+        transcript: [
+          { id: "w-1", text: "Zero", sourceStartMs: 400, sourceEndMs: 900 },
+          { id: "w-2", text: "upload", sourceStartMs: 950, sourceEndMs: 1500 },
+          { id: "w-3", text: "editor.", sourceStartMs: 1550, sourceEndMs: 2200 },
+        ],
+      },
+    );
+
+    const layoutAt1100 = resolveFrameLayout(session.getState(), 1100);
+    expect(layoutAt1100.activeCaption).not.toBeNull();
+    expect(layoutAt1100.activeCaption?.text).toBe("Zero upload editor.");
+    expect(layoutAt1100.activeCaption?.activeWordIndex).toBe(1);
+    expect(layoutAt1100.activeCaption?.activeWord?.text).toBe("upload");
+
+    // Update word text via updateWords and verify canvas renderFrame draws the updated Caption
+    session.dispatch({
+      type: "updateWords",
+      updates: [{ wordId: "w-2", text: "latency" }],
+    });
+
+    const updatedLayout = resolveFrameLayout(session.getState(), 1100);
+    expect(updatedLayout.activeCaption?.text).toBe("Zero latency editor.");
+
+    const fillTextSpy = vi.fn();
+    const mockCtx = {
+      save: vi.fn(),
+      restore: vi.fn(),
+      fillRect: vi.fn(),
+      strokeRect: vi.fn(),
+      drawImage: vi.fn(),
+      setLineDash: vi.fn(),
+      fillText: fillTextSpy,
+      strokeText: vi.fn(),
+      measureText: vi.fn((t: string) => ({ width: t.length * 24 })),
+      fillStyle: "",
+      strokeStyle: "",
+      lineWidth: 1,
+      font: "",
+      textAlign: "left",
+      textBaseline: "alphabetic",
+    } as unknown as CanvasRenderingContext2D;
+
+    renderFrame(mockCtx, null, updatedLayout);
+    expect(
+      fillTextSpy.mock.calls.some((call) =>
+        String(call[0]).includes("Zero latency editor."),
+      ),
+    ).toBe(true);
   });
 });
