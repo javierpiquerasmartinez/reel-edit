@@ -683,7 +683,7 @@ function resolveActiveCaption(
 
   let activeWordIndex = caption.words.findIndex(
     (w) =>
-      timelineTimeMs >= w.timelineStartMs && timelineTimeMs <= w.timelineEndMs,
+      timelineTimeMs >= w.timelineStartMs && timelineTimeMs < w.timelineEndMs,
   );
   if (activeWordIndex === -1) {
     for (let i = caption.words.length - 1; i >= 0; i--) {

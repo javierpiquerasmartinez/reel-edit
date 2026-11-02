@@ -665,6 +665,33 @@ describe("media-engine 9:16 frame compositor descriptor", () => {
     ).toBe(true);
   });
 
+  test("hands the active word to the next word exactly at a shared Word Timing boundary inside one Caption", () => {
+    const session = EditorSession.fromSourceMedia(
+      {
+        id: "source-1",
+        fileName: "contiguous.mp4",
+        durationMs: 8000,
+        width: 1080,
+        height: 1920,
+      },
+      {
+        transcript: [
+          { id: "w-1", text: "el", sourceStartMs: 1120, sourceEndMs: 1280 },
+          { id: "w-2", text: "tumor", sourceStartMs: 1280, sourceEndMs: 1580 },
+          { id: "w-3", text: "más", sourceStartMs: 1580, sourceEndMs: 1920 },
+          { id: "w-4", text: "frecuente", sourceStartMs: 1920, sourceEndMs: 2200 },
+        ],
+      },
+    );
+
+    const state = session.getState();
+    expect(resolveFrameLayout(state, 1579).activeCaption?.activeWord?.text).toBe("tumor");
+    expect(resolveFrameLayout(state, 1580).activeCaption?.activeWord?.text).toBe("más");
+    expect(resolveFrameLayout(state, 1920).activeCaption?.activeWord?.text).toBe("frecuente");
+    // The Caption's final instant still holds its last word
+    expect(resolveFrameLayout(state, 2200).activeCaption?.activeWord?.text).toBe("frecuente");
+  });
+
   test("preloadReelFonts preloads the curated Reel font catalog via browser Font Loading API and resolveFrameLayout deterministically computes Flat, Hormozi Highlight, Word-by-Word Pop, and Word Emphasis styling", async () => {
     const loadSpy = vi.fn(async () => []);
     const fontResult = await preloadReelFonts({
