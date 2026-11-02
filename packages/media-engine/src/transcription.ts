@@ -79,6 +79,7 @@ export interface TranscribeSourceMediaOptions {
   readonly openAiApiKey?: string;
   readonly sourceDurationMs?: number;
   readonly language?: string;
+  readonly onProgress?: (status: string) => void;
   readonly fetchImpl?: typeof fetch;
   readonly workerFactory?: () => WhisperWorkerLike;
   readonly localWhisperRunner?: (
@@ -362,34 +363,166 @@ export async function extract16kHzMonoAudio(
 }
 
 const LOCAL_WHISPER_WORKER_SOURCE = `
+function splitChunksIntoWordTimings(output) {
+  const chunks = Array.isArray(output?.chunks) ? output.chunks : [];
+  const words = [];
+  let wordCounter = 1;
+
+  for (const chunk of chunks) {
+    const rawText = String(chunk?.text || "").trim();
+    if (!rawText) continue;
+    if (/^(\\[.*\\]|\\(.*\\)|\\*.*\\*)$/.test(rawText)) continue;
+
+    const startSec =
+      typeof chunk?.timestamp?.[0] === "number" ? chunk.timestamp[0] : 0;
+    const endSec =
+      typeof chunk?.timestamp?.[1] === "number" && chunk.timestamp[1] > startSec
+        ? chunk.timestamp[1]
+        : startSec + 0.35;
+    const startMs = Math.max(0, Math.round(startSec * 1000));
+    const endMs = Math.max(startMs + 80, Math.round(endSec * 1000));
+
+    const tokens = rawText.split(/\\s+/).filter(Boolean);
+    if (tokens.length <= 1) {
+      words.push({
+        id: "word-" + wordCounter++,
+        text: rawText,
+        sourceStartMs: startMs,
+        sourceEndMs: endMs,
+        emphasis: false,
+      });
+    } else {
+      const spanMs = Math.max(tokens.length * 60, endMs - startMs);
+      const totalChars =
+        tokens.reduce((sum, token) => sum + token.length, 0) || tokens.length;
+      let cursorMs = startMs;
+      for (let i = 0; i < tokens.length; i++) {
+        const token = tokens[i];
+        const weight = token.length / totalChars;
+        const tokenDurationMs =
+          i === tokens.length - 1
+            ? Math.max(60, endMs - cursorMs)
+            : Math.max(60, Math.round(spanMs * weight));
+        const tokenEndMs =
+          i === tokens.length - 1
+            ? Math.max(cursorMs + 60, endMs)
+            : Math.min(endMs, cursorMs + tokenDurationMs);
+        words.push({
+          id: "word-" + wordCounter++,
+          text: token,
+          sourceStartMs: cursorMs,
+          sourceEndMs: Math.max(cursorMs + 40, tokenEndMs),
+          emphasis: false,
+        });
+        cursorMs = tokenEndMs;
+      }
+    }
+  }
+
+  if (words.length === 0 && typeof output?.text === "string" && output.text.trim()) {
+    const tokens = output.text.trim().split(/\\s+/).filter(Boolean);
+    tokens.forEach((token, idx) => {
+      words.push({
+        id: "word-" + (idx + 1),
+        text: token,
+        sourceStartMs: idx * 350,
+        sourceEndMs: (idx + 1) * 350 - 20,
+        emphasis: false,
+      });
+    });
+  }
+
+  return words;
+}
+
 self.onmessage = async (event) => {
   const { audio, model, language } = event.data;
   try {
-    const transformers = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.3/+esm");
+    if (!audio || audio.length === 0) {
+      throw new Error("No audio samples could be decoded from the Source Media file.");
+    }
+
+    self.postMessage({
+      type: "progress",
+      message: "Loading Transformers.js WebAssembly runtime...",
+    });
+
+    const transformers = await import(
+      "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/dist/transformers.min.js"
+    );
+
+    if (transformers.env) {
+      transformers.env.allowLocalModels = false;
+      transformers.env.useBrowserCache = true;
+      if (transformers.env.backends?.onnx?.wasm) {
+        transformers.env.backends.onnx.wasm.wasmPaths =
+          "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.5.1/dist/";
+        transformers.env.backends.onnx.wasm.numThreads = 1;
+        transformers.env.backends.onnx.wasm.proxy = false;
+      }
+    }
+
+    const resolvedModel =
+      !model || model === "onnx-community/whisper-tiny.en"
+        ? "Xenova/whisper-tiny"
+        : model;
+
+    self.postMessage({
+      type: "progress",
+      message: "Loading Whisper model (" + resolvedModel + ")...",
+    });
+
+    const pipelineOptions = resolvedModel.startsWith("onnx-community/")
+      ? {
+          dtype: {
+            encoder_model: "fp32",
+            decoder_model_merged: "q4",
+          },
+        }
+      : {};
+
     const transcriber = await transformers.pipeline(
       "automatic-speech-recognition",
-      model || "onnx-community/whisper-tiny.en",
-      { dtype: "q8" }
+      resolvedModel,
+      pipelineOptions
     );
-    const output = await transcriber(audio, {
-      return_timestamps: "word",
+
+    self.postMessage({
+      type: "progress",
+      message: "Transcribing 16kHz audio in browser...",
+    });
+
+    const isEnglishOnlyModel = resolvedModel.endsWith(".en");
+    const baseRunOptions = {
       chunk_length_s: 30,
       stride_length_s: 5,
-      ...(language ? { language } : {})
-    });
-    const chunks = Array.isArray(output?.chunks) ? output.chunks : [];
-    const words = chunks.map((chunk, index) => ({
-      id: "word-" + (index + 1),
-      text: String(chunk.text || "").trim(),
-      sourceStartMs: Math.round((chunk.timestamp?.[0] ?? 0) * 1000),
-      sourceEndMs: Math.round((chunk.timestamp?.[1] ?? (chunk.timestamp?.[0] ?? 0) + 0.3) * 1000),
-      emphasis: false
-    }));
+      ...(!isEnglishOnlyModel
+        ? {
+            task: "transcribe",
+            ...(language && language !== "auto" ? { language } : {}),
+          }
+        : {}),
+    };
+
+    let output;
+    try {
+      output = await transcriber(audio, {
+        ...baseRunOptions,
+        return_timestamps: "word",
+      });
+    } catch {
+      output = await transcriber(audio, {
+        ...baseRunOptions,
+        return_timestamps: true,
+      });
+    }
+
+    const words = splitChunksIntoWordTimings(output);
     self.postMessage({ type: "result", words });
   } catch (err) {
     self.postMessage({
       type: "error",
-      message: err instanceof Error ? err.message : String(err)
+      message: err instanceof Error ? err.message : String(err),
     });
   }
 };
@@ -434,6 +567,7 @@ async function runWhisperViaWebWorker(
   worker: WhisperWorkerLike,
   audioPayload: DownsampledAudioPayload,
   language?: string,
+  onProgress?: (status: string) => void,
 ): Promise<readonly WordTimingInput[]> {
   return new Promise<readonly WordTimingInput[]>((resolve, reject) => {
     const audioCopy = new Float32Array(audioPayload.samples);
@@ -443,6 +577,12 @@ async function runWhisperViaWebWorker(
         readonly words?: readonly WordTimingInput[];
         readonly message?: string;
       };
+      if (data?.type === "progress") {
+        if (data.message && onProgress) {
+          onProgress(data.message);
+        }
+        return;
+      }
       worker.terminate();
       if (data?.type === "result" && Array.isArray(data.words)) {
         resolve(data.words);
@@ -675,18 +815,12 @@ export async function transcribeSourceMedia(
       ? options.workerFactory()
       : createBrowserWhisperWorker();
     if (worker) {
-      try {
-        localWords = await runWhisperViaWebWorker(
-          worker,
-          audioPayload,
-          options.language,
-        );
-      } catch {
-        localWords = await synthesizeSpeechAlignedFallbackWords(
-          audioPayload,
-          options.sourceDurationMs,
-        );
-      }
+      localWords = await runWhisperViaWebWorker(
+        worker,
+        audioPayload,
+        options.language,
+        options.onProgress,
+      );
     } else {
       localWords = await synthesizeSpeechAlignedFallbackWords(
         audioPayload,

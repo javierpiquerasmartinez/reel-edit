@@ -59,8 +59,13 @@ export function App() {
   );
   const [transcriptionProvider, setTranscriptionProvider] =
     useState<TranscriptionProvider>("local-whisper");
+  const [transcriptionLanguage, setTranscriptionLanguage] =
+    useState<string>("spanish");
   const [openAiApiKey, setOpenAiApiKey] = useState<string>("");
   const [isTranscribing, setIsTranscribing] = useState<boolean>(false);
+  const [transcriptionProgress, setTranscriptionProgress] = useState<
+    string | null
+  >(null);
   const [transcriptionBadge, setTranscriptionBadge] = useState<string | null>(
     null,
   );
@@ -532,12 +537,25 @@ export function App() {
       return;
     }
     setIsTranscribing(true);
+    setTranscriptionProgress("Downsampling audio to 16kHz mono...");
     try {
       const sourceInput = sourceFileRef.current ?? new ArrayBuffer(0);
+      const languageArg =
+        transcriptionLanguage === "auto"
+          ? undefined
+          : transcriptionProvider === "openai"
+            ? transcriptionLanguage === "spanish"
+              ? "es"
+              : "en"
+            : transcriptionLanguage;
       const result = await transcribeSourceMedia(sourceInput, {
         provider: transcriptionProvider,
         openAiApiKey,
+        language: languageArg,
         sourceDurationMs: editorState.sourceMedia.durationMs,
+        onProgress: (status) => {
+          setTranscriptionProgress(status);
+        },
       });
       session.setTranscript(result.words);
       const firstWord = result.words[0];
@@ -560,8 +578,15 @@ export function App() {
       );
     } finally {
       setIsTranscribing(false);
+      setTranscriptionProgress(null);
     }
-  }, [editorState, openAiApiKey, session, transcriptionProvider]);
+  }, [
+    editorState,
+    openAiApiKey,
+    session,
+    transcriptionLanguage,
+    transcriptionProvider,
+  ]);
 
   const handleWordClick = useCallback(
     (
@@ -1195,6 +1220,20 @@ export function App() {
                   </select>
                 </label>
 
+                <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
+                  <span>Spoken Language</span>
+                  <select
+                    aria-label="Spoken Language"
+                    value={transcriptionLanguage}
+                    onChange={(e) => setTranscriptionLanguage(e.target.value)}
+                    className="rounded-lg bg-zinc-950 border border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-200"
+                  >
+                    <option value="spanish">Español (es)</option>
+                    <option value="english">English (en)</option>
+                    <option value="auto">Auto-detect</option>
+                  </select>
+                </label>
+
                 {transcriptionProvider === "openai" && (
                   <label className="flex flex-col gap-1 text-[11px] text-zinc-400">
                     <span>OpenAI API Key</span>
@@ -1218,7 +1257,8 @@ export function App() {
                   <Mic className="w-3.5 h-3.5" />
                   <span>
                     {isTranscribing
-                      ? "Downsampling 16kHz & Transcribing..."
+                      ? (transcriptionProgress ??
+                        "Downsampling 16kHz & Transcribing...")
                       : "Transcribe Audio"}
                   </span>
                 </button>
