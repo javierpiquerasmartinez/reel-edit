@@ -299,6 +299,7 @@ export function sliceClipWaveform(
   envelope: AudioEnvelope,
   clip: Pick<Clip, "sourceStartMs" | "sourceEndMs" | "durationMs">,
   silenceRegions: readonly SilenceRegion[] = [],
+  maxBars?: number,
 ): WaveformBarDescriptor[] {
   if (envelope.bucketDurationMs <= 0 || envelope.peaks.length === 0) {
     return [];
@@ -333,7 +334,46 @@ export function sliceClipWaveform(
     });
   }
 
-  return bars;
+  if (!maxBars || maxBars <= 0 || bars.length <= maxBars) {
+    return bars;
+  }
+
+  const downsampled: WaveformBarDescriptor[] = [];
+  for (let b = 0; b < maxBars; b++) {
+    const startIdx = Math.floor((b * bars.length) / maxBars);
+    const endIdx = Math.max(
+      startIdx + 1,
+      Math.floor(((b + 1) * bars.length) / maxBars),
+    );
+    const group = bars.slice(startIdx, endIdx);
+    const first = group[0];
+    const last = group[group.length - 1];
+    if (!first || !last) {
+      continue;
+    }
+    let maxPeak = 0;
+    let silentDurationMs = 0;
+    let totalDurationMs = 0;
+    for (const item of group) {
+      if (item.peak > maxPeak) {
+        maxPeak = item.peak;
+      }
+      totalDurationMs += item.durationMs;
+      if (item.isSilent) {
+        silentDurationMs += item.durationMs;
+      }
+    }
+    downsampled.push({
+      index: first.index,
+      sourceStartMs: first.sourceStartMs,
+      sourceEndMs: last.sourceEndMs,
+      durationMs: totalDurationMs,
+      peak: maxPeak,
+      isSilent: silentDurationMs > totalDurationMs / 2,
+    });
+  }
+
+  return downsampled;
 }
 
 export interface Rect {

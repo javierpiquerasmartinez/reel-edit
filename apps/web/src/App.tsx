@@ -707,7 +707,7 @@ export function App() {
     selectedClipIds.length < (editorState?.timeline.clips.length ?? 0);
 
   return (
-    <div className="min-h-screen lg:h-screen lg:overflow-hidden bg-zinc-950 text-zinc-100 flex flex-col">
+    <div className="min-h-screen w-full max-w-[100vw] overflow-x-hidden lg:h-screen lg:overflow-hidden bg-zinc-950 text-zinc-100 flex flex-col">
       {/* Top Header Bar */}
       <header className="h-14 shrink-0 border-b border-zinc-800 px-6 flex items-center justify-between bg-zinc-900/60">
         <div className="flex items-center gap-3">
@@ -785,11 +785,11 @@ export function App() {
           </label>
         </main>
       ) : (
-        <main className="flex-1 min-h-0 grid grid-rows-[1fr_auto] overflow-hidden">
+        <main className="flex-1 min-h-0 min-w-0 w-full max-w-full grid grid-cols-[minmax(0,1fr)] grid-rows-[1fr_auto] overflow-hidden">
           {/* Upper Zone: Source Media Info + 9:16 Vertical Canvas Player + Transcript Panel */}
-          <div className="min-h-0 grid grid-cols-1 lg:grid-cols-[290px_1fr_340px] gap-4 p-4 overflow-y-auto lg:overflow-hidden">
+          <div className="min-h-0 min-w-0 w-full grid grid-cols-1 lg:grid-cols-[290px_minmax(0,1fr)_340px] gap-4 p-4 overflow-y-auto lg:overflow-hidden">
             {/* Left Inspector: Source Media & Active Clip Metadata */}
-            <aside className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-4 self-start lg:max-h-full lg:overflow-y-auto">
+            <aside className="min-w-0 rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-4 self-start lg:max-h-full lg:overflow-y-auto">
               <div>
                 <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-400">
                   Source Media
@@ -1054,7 +1054,7 @@ export function App() {
             </aside>
 
             {/* Center: 9:16 Vertical WYSIWYG Canvas Player */}
-            <section className="min-h-0 flex flex-col items-center justify-center gap-3">
+            <section className="min-h-0 min-w-0 flex flex-col items-center justify-center gap-3">
               <div className="relative w-[270px] h-[480px] shrink-0 rounded-2xl overflow-hidden border border-zinc-800 bg-zinc-950 shadow-2xl">
                 {videoUrl && (
                   <video
@@ -1155,7 +1155,7 @@ export function App() {
             {/* Right Panel: Hybrid Transcription & Interactive Transcript Editor */}
             <aside
               aria-label="Transcript"
-              className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-4 self-start lg:max-h-full lg:overflow-y-auto"
+              className="min-w-0 rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 space-y-4 self-start lg:max-h-full lg:overflow-y-auto"
             >
               <div className="flex items-center justify-between gap-2">
                 <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-400 flex items-center gap-1.5">
@@ -1324,7 +1324,7 @@ export function App() {
           {/* Lower Zone: Non-Destructive Timeline & Edit Command Toolbar */}
           <section
             aria-label="Timeline"
-            className="shrink-0 border-t border-zinc-800 bg-zinc-900/70 p-4 space-y-3"
+            className="shrink-0 min-w-0 w-full max-w-full overflow-hidden border-t border-zinc-800 bg-zinc-900/70 p-4 space-y-3"
           >
             {/* Timeline Action Toolbar */}
             <div className="flex flex-wrap items-center justify-between gap-4">
@@ -1406,7 +1406,7 @@ export function App() {
             </div>
 
             {/* Contiguous Clip Track (Ripple Delete guarantees zero gaps) */}
-            <div className="overflow-x-auto pb-2">
+            <div className="w-full min-w-0 overflow-x-auto pb-2">
               <div
                 className="flex items-stretch gap-1.5"
                 style={{ width: `${Math.round(timelineZoom * 100)}%` }}
@@ -1424,6 +1424,7 @@ export function App() {
                         editorState.audioEnvelope,
                         clip,
                         silencePreview?.silenceRegions ?? [],
+                        160,
                       )
                     : [];
                   const clipSilenceIntervals =
@@ -1439,7 +1440,7 @@ export function App() {
                         )
                       }
                       style={{ flexBasis: `${widthPercent}%` }}
-                      className={`group relative rounded-xl border p-3 transition cursor-pointer select-none min-w-[220px] flex-grow ${
+                      className={`group relative rounded-xl border p-3 transition cursor-pointer select-none min-w-[220px] overflow-hidden flex-grow ${
                         isSelected
                           ? "border-sky-400 bg-sky-500/15"
                           : "border-zinc-800 bg-zinc-900 hover:border-zinc-700"
@@ -1524,7 +1525,7 @@ export function App() {
                               flexBasis: 0,
                               height: `${Math.max(14, Math.round(bar.peak * 100))}%`,
                             }}
-                            className={`min-w-[1px] rounded-full transition-all ${
+                            className={`min-w-0 rounded-full transition-all ${
                               bar.isSilent
                                 ? "bg-rose-400/70"
                                 : "bg-sky-400/85"
